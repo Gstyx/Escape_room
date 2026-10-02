@@ -46,6 +46,39 @@ namespace EscapeRoom
         /// Exists only for the self test; nothing in the game calls it.</summary>
         public void ForceClaim(GrabbableItem item) { _held = item; }
 
+        /// <summary>True when t belongs to the held item's subtree (the item root itself or one
+        /// of its visual parts). The key is 9 meshes under one GrabbableItem, so testing only
+        /// the root transform would miss 9 out of 10 self-hits.</summary>
+        public static bool IsHeldPart(GrabbableItem held, Transform t)
+        {
+            if (held == null || t == null) return false;
+            return t == held.transform || t.IsChildOf(held.transform);
+        }
+
+        /// <summary>First ray hit that is NOT the held item itself.
+        ///
+        /// The key hangs 1.9 m in front of the camera, directly under the crosshair ray. A single
+        /// Raycast returns whatever is nearest - and while the player turns, the exponentially
+        /// followed item trails across the ray. Without this filter the click aimed at the socket
+        /// lands on the key instead: no device, so the interactor takes the DROP branch and the
+        /// insert becomes a drop. Skipping the held subtree makes that state unrepresentable.
+        ///
+        /// Shared with Self Test 10, so the test exercises the real routine instead of a copy.
+        /// </summary>
+        public static bool FirstSolidHit(RaycastHit[] hits, GrabbableItem held, out RaycastHit hit)
+        {
+            System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+            foreach (var h in hits)
+            {
+                if (h.collider == null) continue;
+                if (IsHeldPart(held, h.collider.transform)) continue;
+                hit = h;
+                return true;
+            }
+            hit = default(RaycastHit);
+            return false;
+        }
+
         void Start()
         {
             _cam = Camera.main;
@@ -72,8 +105,11 @@ namespace EscapeRoom
             if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject()) return;
 
             Ray ray = _cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            // RaycastAll, not Raycast: the held item hangs under this very ray and must be
+            // filtered by FirstSolidHit instead of winning it (see above).
+            var hits = Physics.RaycastAll(ray, interactDistance, ~0, QueryTriggerInteraction.Collide);
             RaycastHit hit;
-            bool hasHit = Physics.Raycast(ray, out hit, interactDistance, ~0, QueryTriggerInteraction.Collide);
+            bool hasHit = FirstSolidHit(hits, _held, out hit);
 
             if (_held != null)
             {
@@ -96,7 +132,7 @@ namespace EscapeRoom
 
             if (!hasHit) return;
             var grabbable = hit.collider.GetComponentInParent<GrabbableItem>();
-            if (grabbable != null && !grabbable.IsHeld)
+            if (grabbable != null && !grabbable.IsHeld && !grabbable.pickupLocked)
             {
                 grabbable.PickUp(_hold);
                 _held = grabbable;
@@ -109,26 +145,49 @@ namespace EscapeRoom
         void UpdatePrompt()
         {
             if (_cam == null) { _prompt = ""; return; }
-            if (_held != null) { _prompt = "Clique para largar " + _held.displayName; return; }
             Ray ray = _cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            var hits = Physics.RaycastAll(ray, interactDistance, ~0, QueryTriggerInteraction.Collide);
             RaycastHit hit;
-            string next = "";
-            if (Physics.Raycast(ray, out hit, interactDistance, ~0, QueryTriggerInteraction.Collide))
+            // The held filter is a no-op empty-handed; holding, the key hanging in front of
+            // the camera must not answer for what the player is aiming at.
+            bool hasHit = FirstSolidHit(hits, _held, out hit);
+            if (_held != null)
+            {
+                // The teaching moment, before the click rather than after it: which slot this
+                // is, and whether what is in hand belongs there. PromptForAim deliberately
+                // hides the order guard (D-10) - the player works that out by trying.
+                string next = "Clique para largar " + _held.displayName;
+                if (hasHit)
+                {
+                    var d = hit.collider.GetComponentInParent<IInteractable>();
+                    if (d != null)
+                    {
+                        string aim = (d is ItemSocket)
+                            ? ((ItemSocket)d).PromptForAim(_held)
+                            : d.PromptFor(_held);
+                        if (!string.IsNullOrEmpty(aim)) next = aim;
+                    }
+                }
+                _prompt = next;
+                return;
+            }
+            string free = "";
+            if (hasHit)
             {
                 var g = hit.collider.GetComponentInParent<GrabbableItem>();
-                if (g != null) next = "Clique para pegar " + g.displayName;
+                if (g != null && !g.pickupLocked) free = "Clique para pegar " + g.displayName;
                 else
                 {
                     var d = hit.collider.GetComponentInParent<ItemSocket>();
-                    if (d != null) next = d.PromptForAim(_held);
+                    if (d != null) free = d.PromptForAim(_held);
                     else
                     {
                         var other = hit.collider.GetComponentInParent<IInteractable>();
-                        if (other != null) next = other.PromptFor(_held);
+                        if (other != null) free = other.PromptFor(_held);
                     }
                 }
             }
-            _prompt = next;
+            _prompt = free;
         }
 
         static bool ReadPress()

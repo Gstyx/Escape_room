@@ -34,6 +34,11 @@ namespace EscapeRoom
         /// flying through a legitimately far arc.</summary>
         public float leashDelay = 1.2f;
 
+        /// <summary>When true the interactor will not pick this up again (e.g. a plate
+        /// seated in the optical reader: rotation happens through the reader's own
+        /// GIRAR buttons, and a free-hand click must not steal the plate back).</summary>
+        public bool pickupLocked;
+
         Rigidbody _rb;
         Vector3 _homePos;
         Quaternion _homeRot;
@@ -89,7 +94,9 @@ namespace EscapeRoom
         public void Drop()
         {
             if (!IsHeld) return;
-            var dir = _throwDir;
+            // Throw along where the player faces NOW, not where they faced at pickup:
+            // _throwDir is only the fallback for a holder that vanished mid-hold.
+            var dir = _holder != null ? _holder.forward : _throwDir;
             _holder = null;
             _rb.isKinematic = false;
             _rb.useGravity = true;
@@ -115,8 +122,14 @@ namespace EscapeRoom
         public void ReleaseInPlace(Transform parent)
         {
             _holder = null;
-            _rb.isKinematic = true;
-            _rb.useGravity = false;
+            // Defensive fetch: in edit mode Awake never ran, but the component exists.
+            // (Edit-mode self tests drive Interact without a play loop.)
+            var rb = _rb != null ? _rb : GetComponent<Rigidbody>();
+            if (rb != null)
+            {
+                rb.isKinematic = true;
+                rb.useGravity = false;
+            }
             if (parent != null) transform.SetParent(parent, true);
         }
 

@@ -247,6 +247,12 @@ namespace EscapeRoom
         public static void Play(AudioClip clip, Vector3 pos, float volume = 1f, float spatial = 1f)
         {
             if (clip == null) return;
+#if UNITY_EDITOR
+            // No audio pool outside play, and building one needs DontDestroyOnLoad,
+            // which throws in edit mode. A sound effect must never throw - not in
+            // play (D-64) and not from an edit-mode test driving the real path.
+            if (!Application.isPlaying) return;
+#endif
             var src = Next();
             if (src == null) return;     // pool unrecoverable; never throw over a sound effect
             src.transform.position = pos;

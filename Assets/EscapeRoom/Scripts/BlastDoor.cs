@@ -3,10 +3,10 @@ using UnityEngine;
 
 namespace EscapeRoom
 {
-    /// <summary>The sealed exit. Accepts the release card, then plays the heavy servo open.</summary>
+    /// <summary>The sealed exit. Opens only on the optical key: the reader
+    /// approves the acrylic plates and force-opens the leaf.</summary>
     public class BlastDoor : MonoBehaviour, IInteractable
     {
-        public ItemSocket cardSocket;
         public Transform doorLeaf;          // rotates open around its own pivot
         public float openAngle = -105f;
         public float openDuration = 2.6f;
@@ -23,38 +23,34 @@ namespace EscapeRoom
 
         void Start()
         {
-            if (cardSocket != null) cardSocket.onFilled += OnCardInserted;
             Tint(lockedColor);
-        }
-
-        void OnDestroy()
-        {
-            if (cardSocket != null) cardSocket.onFilled -= OnCardInserted;
         }
 
         public string PromptFor(GrabbableItem held)
         {
             if (_open) return "";
-            if (cardSocket != null && cardSocket.IsFilled) return "";
-            return "Painel exige o Cartao de Liberacao";
+            return "Porta selada - revele o digito no leitor optico (leste)";
         }
 
         public bool Interact(GrabbableItem held)
         {
             if (_open) return false;
-            if (cardSocket != null) return cardSocket.Interact(held);
             if (lockedClip != null) EsAudio.Play(lockedClip, transform.position);
             return false;
         }
-
-        void OnCardInserted(ItemSocket socket, GrabbableItem item)
+        /// <summary>The only opener: the optical reader approves the acrylic
+        /// key and the bunker door swings open.</summary>
+        public void ForceOpen()
         {
             if (_open) return;
             _open = true;
             if (servoClip != null) EsAudio.Play(servoClip, transform.position, 1f);
             Tint(openColor);
-            if (_anim != null) StopCoroutine(_anim);
-            _anim = StartCoroutine(Swing());
+            if (Application.isPlaying)
+            {
+                if (_anim != null) StopCoroutine(_anim);
+                _anim = StartCoroutine(Swing());
+            }
             var gm = EscapeGameManager.Instance;
             if (gm != null) gm.Win();
         }
@@ -88,6 +84,13 @@ namespace EscapeRoom
                 m.EnableKeyword("_EMISSION");
                 m.SetColor("_EmissionColor", c * 3f);
             }
+        }
+
+        /// <summary>Test hook: relatch shut without touching materials (the lamp
+        /// keeps its open tint in edit mode; gameplay tinting is untouched).</summary>
+        public void DebugReset()
+        {
+            _open = false;
         }
     }
 }

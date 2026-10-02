@@ -26,11 +26,22 @@ namespace EscapeRoom
         public bool IsFilled { get; private set; }
         public GrabbableItem Item { get; private set; }
 
+        /// <summary>Why the last Interact refused, in screen-facing words. Empty after a success.
+        /// A buzz alone reads as "broken" - the terminal shows this on its status line, so a
+        /// refused insert teaches instead of confusing (which slot, whose item, locked or not).
+        /// ASCII-only by file convention.</summary>
+        public string lastRejectReason { get; private set; } = "";
+
         /// <summary>Optional veto, evaluated BEFORE the item is consumed. Returning false
         /// refuses the interaction and leaves the item in the player's hand. This is how the
         /// terminal enforces the key-before-cell order rule: checking after the fact would
         /// already have swallowed the item.</summary>
         public System.Func<GrabbableItem, bool> guard;
+
+        /// <summary>Optional reason for a guard refusal, shown to the player. When the guard
+        /// fails and this returns non-empty, it becomes lastRejectReason instead of the
+        /// generic "awaiting release" line - e.g. a depleted cell names the charger.</summary>
+        public System.Func<GrabbableItem, string> guardReason;
 
         /// <summary>(socket, acceptedItem)</summary>
         public event Action<ItemSocket, GrabbableItem> onFilled;
@@ -74,10 +85,18 @@ namespace EscapeRoom
         public bool Interact(GrabbableItem held)
         {
             if (IsFilled) return false;
-            if (held == null) { Buzz(false); return false; }
+            string what = string.IsNullOrEmpty(acceptsLabel) ? acceptsKey : acceptsLabel;
+            if (held == null)
+            {
+                lastRejectReason = "ESTE SUPORTE RECEBE: " + what;
+                Buzz(false);
+                return false;
+            }
 
             if (held.ItemKey != acceptsKey)
             {
+                lastRejectReason = "SLOT ERRADO - SUPORTE DE " + what
+                                 + ", VOCE SEGURA " + held.displayName.ToUpperInvariant();
                 Buzz(false);
                 if (onRejected != null) onRejected(this);
                 return false;                    // item stays in hand
@@ -86,6 +105,9 @@ namespace EscapeRoom
             // order / phase rule, evaluated before anything is consumed
             if (guard != null && !guard(held))
             {
+                lastRejectReason = guardReason != null ? (guardReason(held) ?? "") : "";
+                if (string.IsNullOrEmpty(lastRejectReason))
+                    lastRejectReason = "BLOQUEADO - " + what + " AGUARDA LIBERACAO";
                 Buzz(false);
                 if (onRejected != null) onRejected(this);
                 return false;                    // item stays in hand
@@ -93,6 +115,7 @@ namespace EscapeRoom
 
             IsFilled = true;
             Item = held;
+            lastRejectReason = "";
             held.ReleaseInPlace(stowParent != null ? stowParent : transform);
             if (seat != null)
                 held.transform.SetPositionAndRotation(seat.position, seat.rotation);
@@ -106,6 +129,7 @@ namespace EscapeRoom
         {
             IsFilled = false;
             Item = null;
+            lastRejectReason = "";
             Tint(idleColor);
         }
 

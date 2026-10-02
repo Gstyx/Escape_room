@@ -60,8 +60,10 @@ public static class EsSceneBuilder
     // sentence has cost something.
     const string ARC_PREFAB = "Wall_Arc";
 
-    static Material _shell, _shellDark, _metal, _gold, _green, _cyan, _glowOn, _alarm, _paper, _card, _exitGlow, _void,
-                  _keyBody, _keyBrass, _keyGlow, _kitWall;
+    static Material _shell, _shellDark, _metal, _gold, _glowOn, _alarm, _paper, _exitGlow, _void,
+                  _kitWall,
+                  _frost, _carpet, _belt, _screenOff, _panelGlow, _cabRed, _fiber,
+                  _hexBase, _hexDim, _hexLive, _hexSrc, _hexLiveTile, _hexLeaf, _hexLeafLive;
 
     [MenuItem("Tools/Escape Room/Build Level")]
     public static void Build()
@@ -81,6 +83,10 @@ public static class EsSceneBuilder
 
         var old = GameObject.Find(ROOT);
         if (old != null) Object.DestroyImmediate(old);
+        // Play sessions with scene-reload disabled (this project) leak DontDestroyOnLoad
+        // pools and dragged items into the saved scene, and old builds left HUD copies at
+        // the scene root (BuildHud used to parent nothing and only clean the crosshair).
+        CleanStrayRootObjects();
 
         EnsureFolders();
         BuildMaterials();
@@ -97,11 +103,18 @@ public static class EsSceneBuilder
         var door = BuildBlastDoor(root.transform);
         BuildNotes(root.transform);
         BuildProps(root.transform);
+        BuildDressing(root.transform);
+        BuildAegisDressing(root.transform);
         var lights = BuildLights(root.transform);
         var gm = BuildGameManager(root.transform, terminal, door, lights);
+        gm.SetEmergencyLighting();
+        var hexGrid = BuildHexPanel(root.transform, gm);
+        BuildLogStation(root.transform, hexGrid);
+        BuildPlateReaderStation(root.transform, door, gm);
+        WireTerminalObjectives(terminal);
 
         BuildEventSystem(root.transform);
-        BuildHud();
+        BuildHud(root.transform);
         // The floor grid lives under EscapeRoom_Root, and Build() has just destroyed and recreated
         // that root - so building the grid anywhere but here means it silently disappears on the
         // next Build Level and the hand-placed run stays deactivated underneath. A floor that only
@@ -504,14 +517,13 @@ public static class EsSceneBuilder
     ///
     /// The reboot is a 1.4 s coroutine, and the Unity player loop does not tick while the Editor
     /// window is unfocused, so driving the terminal by clicking leaves it parked in Booting with
-    /// the keypad still hidden - the second layout never gets checked. This reconstructs the
+    /// the hint still empty - the second layout never gets checked. This reconstructs the
     /// post-reboot state directly, checks it, then restores.
     ///
-    /// The rebuild has to hide the reboot button too, not just show the keypad. Showing the keypad
-    /// alone is not a state the game can ever be in, and checking it reported a 55 unit overlap
-    /// between the button and the hint that cannot happen: before the reboot the hint is empty and
-    /// the keypad is hidden, after it the button is hidden. The three are mutually exclusive, and
-    /// the check has to reproduce the real state or it is measuring a fiction.
+    /// The rebuild has to hide the reboot button too, not just populate the hint. Checking the
+    /// button and the hint together would measure a fiction: after the reboot the button is
+    /// hidden. The two are mutually exclusive, and the check has to reproduce the real state
+    /// or it is measuring a fiction.
     ///
     /// Worth knowing when reading the numbers: a RectTransform's local space is centred on its
     /// pivot, so a 1920x1080 canvas spans y -540..+540, not 0..1080.
@@ -521,27 +533,23 @@ public static class EsSceneBuilder
     {
         var tc = Object.FindFirstObjectByType<TerminalController>();
         if (tc == null) { Debug.LogError("[CanvasOverlap] no TerminalController"); return; }
-        if (tc.keypadRoot == null) { Debug.LogError("[CanvasOverlap] keypadRoot is NULL"); return; }
         if (tc.rebootButton == null) { Debug.LogError("[CanvasOverlap] rebootButton is NULL"); return; }
 
-        bool kpWas = tc.keypadRoot.gameObject.activeSelf;
         bool btnWas = tc.rebootButton.gameObject.activeSelf;
         string hint = tc.hintText != null ? tc.hintText.text : null;
 
-        // post-reboot: button gone, keypad up, hint populated
+        // post-reboot: button gone, objective hint populated
         tc.rebootButton.gameObject.SetActive(false);
-        tc.keypadRoot.gameObject.SetActive(true);
-        if (tc.hintText != null) tc.hintText.text = "CREDENCIAL DE SOBREVIVENCIA: 2 DIGITOS";
+        if (tc.hintText != null) tc.RefreshObjective();
         Canvas.ForceUpdateCanvases();   // regenerate the text so tight bounds are valid
 
-        Debug.Log("[CanvasOverlap] --- POST-REBOOT state (button hidden, keypad + hint shown) ---");
+        Debug.Log("[CanvasOverlap] --- POST-REBOOT state (button hidden, objective hint shown) ---");
         CheckCanvasOverlaps();
 
         tc.rebootButton.gameObject.SetActive(btnWas);
-        tc.keypadRoot.gameObject.SetActive(kpWas);
         if (tc.hintText != null) tc.hintText.text = hint;
         Canvas.ForceUpdateCanvases();
-        Debug.Log("[CanvasOverlap] --- restored: keypad=" + kpWas + " button=" + btnWas + " ---");
+        Debug.Log("[CanvasOverlap] --- restored: button=" + btnWas + " ---");
     }
 
     /// <summary>Proves the aiming maths, the distance case, and the HUD's click safety.
@@ -609,11 +617,13 @@ public static class EsSceneBuilder
         Debug.Log("[SelfTest6] interact key still absent = " + noEKey + "   "
                   + (noEKey ? "PASS" : "FAIL - a loose key path could still enter the code"));
 
-        // 2. THE PUDDLE INVARIANT. The keypad must be unreachable at the loose radius, even though
-        //    the reboot button at the very same moment is reachable. If this ever passes for a key,
-        //    the puzzle has been answered by aiming, which is the exact thing the interact key was
-        //    removed for.
-        var kp = tc.keypadRoot;
+        // 2. THE PUDDLE INVARIANT. The safe keypad must be unreachable at the
+        //    loose radius, even though the reboot button at the very same
+        //    moment is reachable. If this ever passes for a key, the puzzle
+        //    has been answered by aiming, which is the exact thing the
+        //    interact key was removed for.
+        var safepad = Object.FindFirstObjectByType<EsSafeKeypad>();
+        var kp = safepad != null ? safepad.keypadRoot : null;
         bool keypadMarked = kp != null && kp.GetComponent<EsPuzzleInput>() != null;
         int keysChecked = 0, keysUnreachable = 0;
         if (kp != null)
@@ -668,14 +678,13 @@ public static class EsSceneBuilder
                       + (ok5 ? "PASS" : "FAIL"));
         }
 
-        // 5. every keypad key must have a hit plane of exactly its own size, offset toward the
-        //    viewer. This is checked GEOMETRICALLY rather than by raycast, and deliberately so: the
-        //    keypad is hidden until the reboot, force-activating it does not register its graphics
-        //    in the GraphicRegistry, and a probe there could only ever report INCONCLUSIVE. Since
+        // 5. every safe key must have a hit plane of exactly its own size, offset toward the
+        //    viewer. This is checked GEOMETRICALLY rather than by raycast, and deliberately so: a
+        //    probe there could only ever report INCONCLUSIVE. Since
         //    the hit plane is the same rect as the face, "same size" is the whole contract - and
         //    unlike the old padding there is no way for one key's target to overlap a neighbour's
         //    face, which is the bug that padding created and that this removes by construction.
-        var keypadGo = tc.keypadRoot;
+        var keypadGo = kp;
         int planesChecked = 0, planesBad = 0;
         if (keypadGo == null)
         {
@@ -687,9 +696,9 @@ public static class EsSceneBuilder
             for (int i = 0; i < kps.Length; i++)
             {
                 var k = kps[i];
-                if (!k.name.StartsWith("Key_")) continue;
+                if (!k.name.StartsWith("SKey_")) continue;
                 planesChecked++;
-                var kh = k.Find("HitArea_Key") as RectTransform;
+                var kh = k.Find("HitArea_SKey") as RectTransform;
                 bool same = kh != null && kh.sizeDelta == k.sizeDelta;
                 float off = kh != null ? Vector3.Distance(kh.position, k.position) : 0f;
                 // the offset must be along the canvas normal, i.e. purely in local Z
@@ -889,6 +898,12 @@ public static class EsSceneBuilder
         Color roundTrip = Color.clear;
         if (hl != null)
         {
+            // The live game may already have this button hovered (the spawn
+            // view puts the crosshair within the loose radius, and the
+            // crosshair pointer drives SetHovered every frame in play). Force
+            // the known-off state first, or "before" measures mid-hover and
+            // the assertion races the game instead of testing the component.
+            hl.SetHovered(false);
             var plate = rb.targetGraphic;
             Color before = plate.color;
             hl.SetHovered(true);
@@ -1119,39 +1134,37 @@ public static class EsSceneBuilder
     /// failing when the player reported that clicking the digits did nothing, so they are the steps
     /// worth testing.
     ///
-    /// It aims at Key_8 the way the player would, presses through the identical code path
+    /// It aims at SKey_3 the way the player would, presses through the identical code path
     /// <see cref="EsCrosshairPointer"/> uses, and then reads the keypad ECHO to see whether a digit
     /// actually landed. The echo is the observable, not the click: a dispatch that looks fine and
     /// types nothing is exactly the bug being hunted.
     /// </summary>
-    [MenuItem("Tools/Escape Room/Self Test 7 - crosshair click on a keypad digit")]
+    [MenuItem("Tools/Escape Room/Self Test 7 - crosshair click on a safe digit")]
     public static void SelfTest7CrosshairKeypad()
     {
         var cam = Camera.main;
         if (cam == null) { Debug.LogError("[SelfTest7] Camera.main is NULL"); return; }
         var es = EventSystem.current;
         if (es == null) { Debug.LogError("[SelfTest7] EventSystem.current is NULL"); return; }
-        var tc = Object.FindFirstObjectByType<TerminalController>();
-        if (tc == null || tc.keypadRoot == null) { Debug.LogError("[SelfTest7] no keypad"); return; }
+        var pad = Object.FindFirstObjectByType<EsSafeKeypad>();
+        if (pad == null || pad.keypadRoot == null) { Debug.LogError("[SelfTest7] no safe keypad"); return; }
         var xp = es.GetComponent<EsCrosshairPointer>();
         if (xp == null) { Debug.LogError("[SelfTest7] no EsCrosshairPointer"); return; }
         var rig = cam.GetComponent<EsFirstPersonCameraRig>();
         if (rig == null || rig.body == null) { Debug.LogError("[SelfTest7] camera rig not wired"); return; }
 
-        // Real post-reboot state: keypad up, reboot button gone.
-        bool kpWas = tc.keypadRoot.activeSelf, btnWas = tc.rebootButton.gameObject.activeSelf;
-        tc.keypadRoot.SetActive(true);
-        tc.rebootButton.gameObject.SetActive(false);
+        // Deterministic even after Self Test 2 solved the safe: a fresh entry.
+        pad.DebugReset();
         Canvas.ForceUpdateCanvases();
 
-        var key8 = tc.keypadRoot.transform.Find("Key_8") as RectTransform;
-        if (key8 == null) { Debug.LogError("[SelfTest7] Key_8 not found"); return; }
+        var key3 = pad.keypadRoot.transform.Find("SKey_3") as RectTransform;
+        if (key3 == null) { Debug.LogError("[SelfTest7] SKey_3 not found"); return; }
 
         var corners = new Vector3[4];
-        key8.GetWorldCorners(corners);
+        key3.GetWorldCorners(corners);
         Vector3 target = (corners[0] + corners[2]) * 0.5f;
 
-        // Stand where a player stands to use the keypad: close, in front of it.
+        // Stand where a player stands to use the safe: close, in front of it.
         Vector3 flat = target - rig.body.position;
         flat.y = 0f;
         if (flat.sqrMagnitude < 0.0001f) flat = Vector3.forward;
@@ -1170,15 +1183,15 @@ public static class EsSceneBuilder
             : null;
         Vector2 sp = RectTransformUtility.WorldToScreenPoint(cam, target);
 
-        Debug.Log("[SelfTest7] aimed at Key_8 from " + Vector3.Distance(cam.transform.position, target).ToString("F2")
+        Debug.Log("[SelfTest7] aimed at SKey_3 from " + Vector3.Distance(cam.transform.position, target).ToString("F2")
                   + " m; FindTarget='" + (found == null ? "NOTHING" : found.name)
                   + "', frozenOScursor=" + (mouse != null ? mouse.position.ReadValue().ToString("F0") : "n/a")
                   + " -> normalPathWouldHit='" + (normal == null ? "nothing" : normal.name) + "'");
-        Debug.Log("[SelfTest7] Key_8 on screen at " + sp.ToString("F0") + " of " + Screen.width + "x" + Screen.height);
+        Debug.Log("[SelfTest7] SKey_3 on screen at " + sp.ToString("F0") + " of " + Screen.width + "x" + Screen.height);
 
-        if (found != key8.gameObject)
+        if (found != key3.gameObject)
         {
-            Debug.LogError("[SelfTest7] FAIL - FindTarget did not return Key_8, so no click could reach it");
+            Debug.LogError("[SelfTest7] FAIL - FindTarget did not return SKey_3, so no click could reach it");
         }
         else
         {
@@ -1197,17 +1210,13 @@ public static class EsSceneBuilder
         }
 
         // The observable: did a digit actually land?
-        var echo = tc.keypadRoot.GetComponentInChildren<UnityEngine.UI.Text>(true);
         string shown = "?";
-        foreach (var t in tc.keypadRoot.GetComponentsInChildren<UnityEngine.UI.Text>(true))
-            if (t.name == "KeypadEcho") shown = t.text;
-        Debug.Log("[SelfTest7] keypad echo = '" + shown + "'   "
-                  + (shown.StartsWith("8") ? "PASS (the digit landed)" : "FAIL (nothing was typed)"));
-
-        tc.rebootButton.gameObject.SetActive(btnWas);
-        tc.keypadRoot.SetActive(kpWas);
-        Canvas.ForceUpdateCanvases();
+        foreach (var t in pad.keypadRoot.GetComponentsInChildren<UnityEngine.UI.Text>(true))
+            if (t.name == "SafeEcho") shown = t.text;
+        Debug.Log("[SelfTest7] safe echo = '" + shown + "'   "
+                  + (shown.StartsWith("3") ? "PASS (the digit landed)" : "FAIL (nothing was typed)"));
     }
+
 
     /// <summary>Reports every geometry overlap involving the generated <c>Shell</c>.
     ///
@@ -1457,6 +1466,500 @@ public static class EsSceneBuilder
                   + " (reconcile cleared the claim: " + healed + ", item re-pickable: " + repickable + ")");
     }
 
+    /// <summary>The held item must not eat the insert click.
+    ///
+    /// A plate carried to the reader hangs 1.9 m in front of the camera,
+    /// directly under the crosshair ray. A single
+    /// Raycast returns whatever is nearest, so a click aimed at the socket could land on the plate
+    /// instead - no device, DROP branch, insert becomes drop. PlayerInteractor.FirstSolidHit
+    /// skips the held subtree; this stands the player 2 m in front of a plate slot with a plate
+    /// at the hold point and asserts the click resolves to the slot.
+    ///
+    /// Geometry only, no PickUp: in edit mode the rigidbody was never awoken, so PickUp would
+    /// NRE on _rb - and the ray only cares about geometry, which is identical either way.</summary>
+    [MenuItem("Tools/Escape Room/Self Test 10 - held item does not block its own insert")]
+    public static void SelfTest10HeldItemRay()
+    {
+        var cam = Camera.main;
+        if (cam == null) { Debug.LogError("[SelfTest10] Camera.main is NULL"); return; }
+        var rig = cam.GetComponent<EsFirstPersonCameraRig>();
+        if (rig == null || rig.body == null) { Debug.LogError("[SelfTest10] camera rig not wired"); return; }
+        var inter = Object.FindFirstObjectByType<PlayerInteractor>();
+        if (inter == null) { Debug.LogError("[SelfTest10] no PlayerInteractor"); return; }
+        GrabbableItem key = null;
+        foreach (var it in Object.FindObjectsByType<GrabbableItem>(FindObjectsSortMode.None))
+            if (it.itemKey == "placa") key = it;
+        if (key == null) { Debug.LogError("[SelfTest10] no plate item"); return; }
+        ItemSocket slot = null;
+        foreach (var s in Object.FindObjectsByType<ItemSocket>(FindObjectsSortMode.None))
+            if (s.acceptsKey == "placa") slot = s;
+        if (slot == null) { Debug.LogError("[SelfTest10] no plate slot"); return; }
+
+        var hold = inter.HoldTransform != null ? inter.HoldTransform : cam.transform;
+        Vector3 bodyPos0 = rig.body.position;
+        Quaternion bodyRot0 = rig.body.rotation;
+        Vector3 keyPos0 = key.transform.position;
+        Quaternion keyRot0 = key.transform.rotation;
+
+        var scol = slot.GetComponent<Collider>();
+        Vector3 seat = scol != null ? scol.bounds.center : slot.transform.position;
+        Vector3 flat = seat - rig.body.position;
+        flat.y = 0f;
+        if (flat.sqrMagnitude < 0.0001f) flat = Vector3.forward;
+        flat.Normalize();
+        rig.body.position = new Vector3(seat.x - flat.x * 2.0f, bodyPos0.y, seat.z - flat.z * 2.0f);
+        float yaw, pitch;
+        rig.LookAtPoint(seat, out yaw, out pitch);
+        rig.SetLook(yaw, pitch);
+
+        // The key hanging in the hand: same formula GrabbableItem follows in FixedUpdate.
+        Vector3 target = hold.position + hold.forward * key.holdDistance + Vector3.up * key.holdHeight;
+        key.transform.SetPositionAndRotation(target, hold.rotation);
+
+        Ray ray = cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+        var hits = Physics.RaycastAll(ray, inter.interactDistance, ~0, QueryTriggerInteraction.Collide);
+        RaycastHit first;
+        bool hasHit = PlayerInteractor.FirstSolidHit(hits, key, out first);
+        IInteractable dev = hasHit ? first.collider.GetComponentInParent<IInteractable>() : null;
+
+        bool pass10 = dev == (IInteractable)slot;
+        Debug.Log("[SelfTest10] held plate at " + target.ToString("F2") + ", socket " + seat.ToString("F2")
+                  + " d=" + Vector3.Distance(cam.transform.position, seat).ToString("F2")
+                  + "; first solid hit = " + (hasHit ? first.collider.name + " at " + first.distance.ToString("F2") : "NONE")
+                  + " -> " + (dev == null ? "nothing" : (dev == (IInteractable)slot ? "the plate slot" : "something else")));
+        Debug.Log("[SelfTest10] VERDICT = " + (pass10 ? "PASS (the insert click reaches the slot past the held plate)"
+                                                      : "FAIL (the held plate or an occluder eats the click - insert becomes drop)"));
+
+        key.transform.SetPositionAndRotation(keyPos0, keyRot0);
+        rig.body.SetPositionAndRotation(bodyPos0, bodyRot0);
+    }
+
+
+    /// <summary>Puzzle 1 (Fase 1), end to end in edit mode: the parity table, the
+    /// solved state, pip-geometry-vs-logic, the reward, one leak breaking it, and
+    /// the discriminating case — receptor fed while a leak stands, which the
+    /// simplified path-only rule would WRONGLY accept. That last case is the
+    /// whole reason the win rule is strict (D-180). Clips muted (no audio pool
+    /// in edit mode); room light and rotations captured and restored.</summary>
+    [MenuItem("Tools/Escape Room/Self Test 13 - hex grid solve and leak rule")]
+    public static void SelfTest13HexGrid()
+    {
+        var grid = Object.FindFirstObjectByType<EsHexGrid>();
+        if (grid == null) { Debug.LogError("[SelfTest13] no EsHexGrid in the scene"); return; }
+        int fails = 0;
+
+        var saveRot = new Dictionary<EsHexNode, int>();
+        foreach (var n in grid.nodes) saveRot[n] = n.rotation;
+        var rc = grid.rotateClip; var sc = grid.solvedClip;
+        grid.rotateClip = null; grid.solvedClip = null;
+        bool powWas = grid.powerRestored;
+        grid.DebugResetPower();
+        Color lightC = Color.black; float lightI = 0f;
+        bool hasLight = grid.gm != null && grid.gm.roomLight != null;
+        if (hasLight) { lightC = grid.gm.roomLight.color; lightI = grid.gm.roomLight.intensity; }
+
+        // 1. neighbour parity table round-trips everywhere
+        int bad = 0, total = 0;
+        for (int c = 0; c < grid.cols; c++)
+            for (int r = 0; r < grid.rows; r++)
+                for (int d = 0; d < 6; d++)
+                {
+                    int nc, nr;
+                    if (!EsHexGrid.Neighbour(c, r, d, grid.cols, grid.rows, out nc, out nr)) continue;
+                    total++;
+                    int bc, br;
+                    if (!EsHexGrid.Neighbour(nc, nr, EsHexGrid.Opp(d), grid.cols, grid.rows, out bc, out br)
+                        || bc != c || br != r) bad++;
+                }
+        bool ok1 = bad == 0 && total > 0;
+        if (!ok1) fails++;
+        Debug.Log("[SelfTest13] neighbour round-trip " + (total - bad) + "/" + total + "   "
+                  + (ok1 ? "PASS" : "FAIL"));
+
+        // 1b. table-vs-layout DISTANCE: every table link must join cells exactly
+        // one hex pitch apart. Round-trip alone cannot catch a mirrored table
+        // (a mirror preserves Opp-symmetry and still round-trips 66/66) while
+        // geometrically mating ports never meet - the 400/400-clean failure.
+        int badDist = 0, totalDist = 0;
+        float hexPitch = Mathf.Sqrt(3f) * grid.cellSize;
+        for (int c = 0; c < grid.cols; c++)
+            for (int r = 0; r < grid.rows; r++)
+                for (int d = 0; d < 6; d++)
+                {
+                    int nc, nr;
+                    if (!EsHexGrid.Neighbour(c, r, d, grid.cols, grid.rows, out nc, out nr)) continue;
+                    totalDist++;
+                    float dist = (EsHexGrid.CellLocal(nc, nr, grid.cellSize)
+                                - EsHexGrid.CellLocal(c, r, grid.cellSize)).magnitude;
+                    if (Mathf.Abs(dist - hexPitch) > 0.001f)
+                    {
+                        badDist++;
+                        if (badDist <= 3)
+                            Debug.Log("[SelfTest13]   off-pitch link (" + c + "," + r + ") dir " + d
+                                      + " -> (" + nc + "," + nr + ") dist " + dist.ToString("F3")
+                                      + " want " + hexPitch.ToString("F3"));
+                    }
+                }
+        bool ok1c = badDist == 0 && totalDist > 0;
+        if (!ok1c) fails++;
+        Debug.Log("[SelfTest13] neighbour layout distance " + (totalDist - badDist) + "/" + totalDist + "   "
+                  + (ok1c ? "PASS" : "FAIL (mirrored table)"));
+
+        // route-adjacent rotatable decoys (the 2 terminator caps live here):
+        // the leak rule needs something to bite.
+        int adjRot = 0;
+        var pathKeys = new HashSet<int>();
+        foreach (var n in grid.nodes) if (n.isPath) pathKeys.Add(n.col * grid.rows + n.row);
+        foreach (var n in grid.nodes)
+        {
+            if (n.isPath || n.isFixed) continue;
+            for (int d = 0; d < 6; d++)
+            {
+                int nc, nr;
+                if (EsHexGrid.Neighbour(n.col, n.row, d, grid.cols, grid.rows, out nc, out nr)
+                    && pathKeys.Contains(nc * grid.rows + nr)) { adjRot++; break; }
+            }
+        }
+        bool ok1b = adjRot >= 1;
+        if (!ok1b) fails++;
+        Debug.Log("[SelfTest13] route-adjacent rotatables = " + adjRot + "   "
+                  + (ok1b ? "PASS (caps present)" : "FAIL (no caps?)"));
+
+        // 2. the shipped solution solves
+        foreach (var n in grid.nodes) grid.SetRotationSilent(n, n.solvedRotation);
+        bool ok2 = grid.IsSolved();
+        if (!ok2) fails++;
+        Debug.Log("[SelfTest13] solution rotations -> IsSolved=" + ok2 + "   "
+                  + (ok2 ? "PASS" : "FAIL"));
+
+        // 3. pip geometry matches logic on the emitter
+        EsHexNode emitter = null;
+        foreach (var n in grid.nodes) if (n.kind == NodeKind.Emitter) emitter = n;
+        bool ok3 = false;
+        if (emitter != null)
+        {
+            int bits = 0, d0 = -1;
+            for (int d = 0; d < 6; d++) if ((emitter.baseMask & (1 << d)) != 0) { bits++; d0 = d; }
+            float want = ((d0 + emitter.solvedRotation) * 60f) % 360f;
+            if (bits >= 1 && emitter.pips.Count == bits)
+            {
+                foreach (var p in emitter.pips)
+                {
+                    Vector3 lp = p.transform.localPosition;
+                    float got = Mathf.Atan2(lp.y, lp.x) * Mathf.Rad2Deg;
+                    if (got < 0f) got += 360f;
+                    float diff = Mathf.Abs(got - want);
+                    if (diff > 180f) diff = 360f - diff;
+                    if (diff < 2f) { ok3 = true; break; }
+                }
+            }
+            Debug.Log("[SelfTest13] emitter port dir=" + d0 + " want=" + want.ToString("F1")
+                      + " pips=" + emitter.pips.Count + "   " + (ok3 ? "PASS" : "FAIL"));
+        }
+        else Debug.LogError("[SelfTest13] no emitter node");
+        if (!ok3) fails++;
+
+        // 4. the reward fires: latch + room goes blue
+        grid.CheckAndReward();
+        bool blue = hasLight && grid.gm.roomLight.color.b > grid.gm.roomLight.color.r;
+        bool ok4 = grid.powerRestored && blue;
+        if (!ok4) fails++;
+        Debug.Log("[SelfTest13] reward: latched=" + grid.powerRestored + " room="
+                  + (hasLight ? grid.gm.roomLight.color.ToString("F2") : "n/a") + "   "
+                  + (ok4 ? "PASS (red -> blue)" : "FAIL"));
+
+        // 5. one leak breaks it
+        EsHexNode pathNode = null;
+        foreach (var n in grid.nodes) if (n.isPath && !n.isFixed) { pathNode = n; break; }
+        grid.DebugResetPower();
+        if (pathNode != null) grid.SetRotationSilent(pathNode, (pathNode.solvedRotation + 1) % 6);
+        bool ok5 = !grid.IsSolved();
+        if (!ok5) fails++;
+        Debug.Log("[SelfTest13] one path node +60 -> IsSolved=" + grid.IsSolved() + "   "
+                  + (ok5 ? "PASS" : "FAIL"));
+
+        // 6. THE discriminating case: receptor fed, leak standing. Searched over
+        // one- then two-move perturbations of the solution; path-only validation
+        // would accept these, the strict rule must not.
+        foreach (var n in grid.nodes) grid.SetRotationSilent(n, n.solvedRotation);
+        grid.DebugResetPower();
+        bool found = DiscriminatingLeak(grid, 1) || DiscriminatingLeak(grid, 2);
+        if (!found) fails++;
+        Debug.Log("[SelfTest13] receptor-fed-with-leak rejected = " + found + "   "
+                  + (found ? "PASS (strict rule bites)" : "FAIL - path-only would accept everything"));
+
+        // 7. the REAL click path reaches a node: stand 2 m in front of one and
+        // resolve through FirstSolidHit, the same routine play uses (SelfTest10
+        // pattern). Proves colliders, layers and distance, not just logic.
+        // Runs BEFORE the restore below, while clips are still muted.
+        var cam = Camera.main;
+        var rig = cam != null ? cam.GetComponent<EsFirstPersonCameraRig>() : null;
+        var inter = Object.FindFirstObjectByType<PlayerInteractor>();
+        EsHexNode target = null;
+        foreach (var n in grid.nodes) if (!n.isFixed) { target = n; break; }
+        bool ok7 = false;
+        if (cam != null && rig != null && rig.body != null && inter != null && target != null)
+        {
+            Vector3 bodyPos0 = rig.body.position;
+            Quaternion bodyRot0 = rig.body.rotation;
+            var tcol = target.GetComponent<Collider>();
+            Vector3 seat = tcol != null ? tcol.bounds.center : target.transform.position;
+            // Due south of the node, not along the body->node diagonal: from the
+            // southwest the locker stands in front of the panel's west edge
+            // (measured: LockerRight wins the ray at d=0.99). A real player
+            // sidesteps to face the panel; the test stands where they would.
+            rig.body.position = new Vector3(seat.x, bodyPos0.y, seat.z + 2.0f);
+            float yaw, pitch;
+            rig.LookAtPoint(seat, out yaw, out pitch);
+            rig.SetLook(yaw, pitch);
+            Physics.SyncTransforms();
+            int rotBefore = target.rotation;
+            Ray ray = cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            var hits = Physics.RaycastAll(ray, inter.interactDistance, ~0, QueryTriggerInteraction.Collide);
+            RaycastHit first;
+            EsHexNode got = null;
+            if (PlayerInteractor.FirstSolidHit(hits, null, out first))
+                got = first.collider.GetComponentInParent<EsHexNode>();
+            if (got == target)
+            {
+                got.Interact(null);
+                ok7 = target.rotation == (rotBefore + 1) % 6;
+                grid.SetRotationSilent(target, rotBefore);
+            }
+            rig.body.SetPositionAndRotation(bodyPos0, bodyRot0);
+            Physics.SyncTransforms();
+            Debug.Log("[SelfTest13] click path -> " + (got == null ? "NOTHING" : got.name)
+                      + " rotated=" + ok7 + "   " + (ok7 ? "PASS" : "FAIL"));
+        }
+        else Debug.LogError("[SelfTest13] no camera rig/interactor for the click-path case");
+        if (!ok7) fails++;
+
+        // 8. leaf visual contract (D-183): single-pip hexes never wear route
+        // colors (teal dark/live only), multi-pip normals never wear leaf
+        // colors. Holds lit or dark - RefreshAll already ran for this board.
+        int leaves = 0, badLeaf = 0;
+        foreach (var n in grid.nodes)
+        {
+            if (n.kind != NodeKind.Normal || n.tileRenderer == null) continue;
+            var tm = n.tileRenderer.sharedMaterial;
+            if (n.isLeaf)
+            {
+                leaves++;
+                if (tm != grid.leafMat && tm != grid.leafLiveMat) badLeaf++;
+            }
+            else if (tm == grid.leafMat || tm == grid.leafLiveMat) badLeaf++;
+        }
+        bool ok8 = leaves >= 2 && badLeaf == 0 && grid.leafMat != null && grid.leafLiveMat != null
+                   && grid.leafMat != grid.baseMat && grid.leafLiveMat != grid.liveTileMat;
+        if (!ok8) fails++;
+        Debug.Log("[SelfTest13] leaf colors: leaves=" + leaves + " violations=" + badLeaf + "   "
+                  + (ok8 ? "PASS (1-pip hexes teal)" : "FAIL"));
+
+        // restore: rotations, latch, light, clips
+        foreach (var n in grid.nodes) grid.SetRotationSilent(n, saveRot[n]);
+        grid.DebugResetPower();
+        if (powWas)
+        {
+            foreach (var n in grid.nodes) grid.SetRotationSilent(n, n.solvedRotation);
+            grid.CheckAndReward();
+            foreach (var n in grid.nodes) grid.SetRotationSilent(n, saveRot[n]);
+            grid.DebugResetPower();
+        }
+        if (hasLight) { grid.gm.roomLight.color = lightC; grid.gm.roomLight.intensity = lightI; }
+        grid.rotateClip = rc; grid.solvedClip = sc;
+
+        Debug.Log("[SelfTest13] VERDICT = " + (fails == 0 ? "PASS (8/8)" : "FAIL (" + fails + ")")
+                  + " - board restored");
+    }
+
+    /// <summary>Searches k-move perturbations of the shipped solution for a state
+    /// with the receptor energized but IsSolved() false. depth=1 covers single
+    /// slips; depth=2 covers pairs. Leaves the board solved and unlatched.</summary>
+    static bool DiscriminatingLeak(EsHexGrid grid, int depth)
+    {
+        var movers = new List<EsHexNode>();
+        foreach (var n in grid.nodes) if (!n.isFixed) movers.Add(n);
+        if (depth == 1)
+        {
+            foreach (var n in movers)
+                for (int r = 0; r < 6; r++)
+                {
+                    if (r == n.solvedRotation) continue;
+                    grid.SetRotationSilent(n, r);
+                    bool hit = grid.ReceptorEnergized() && !grid.IsSolved();
+                    grid.SetRotationSilent(n, n.solvedRotation);
+                    if (hit)
+                    {
+                        Debug.Log("[SelfTest13]   witness: " + n.name + " at " + r
+                                  + " feeds the receptor through a leak");
+                        return true;
+                    }
+                }
+            return false;
+        }
+        for (int i = 0; i < movers.Count; i++)
+            for (int r = 0; r < 6; r++)
+            {
+                if (r == movers[i].solvedRotation) continue;
+                grid.SetRotationSilent(movers[i], r);
+                for (int j = i + 1; j < movers.Count; j++)
+                    for (int s = 0; s < 6; s++)
+                    {
+                        if (s == movers[j].solvedRotation) continue;
+                        grid.SetRotationSilent(movers[j], s);
+                        bool hit = grid.ReceptorEnergized() && !grid.IsSolved();
+                        grid.SetRotationSilent(movers[j], movers[j].solvedRotation);
+                        if (hit)
+                        {
+                            grid.SetRotationSilent(movers[i], movers[i].solvedRotation);
+                            Debug.Log("[SelfTest13]   witness: " + movers[i].name + "@" + r
+                                      + " + " + movers[j].name + "@" + s);
+                            return true;
+                        }
+                    }
+                grid.SetRotationSilent(movers[i], movers[i].solvedRotation);
+            }
+        return false;
+    }
+
+    /// <summary>Self Test 14: log sort solves to PIN 3719 (edit-safe, no UI drive).</summary>
+    [MenuItem("Tools/Escape Room/Self Test 14 - log sort yields PIN 3719")]
+    public static void SelfTest14LogSort()
+    {
+        int fails = 0;
+        var log = Object.FindFirstObjectByType<EsLogSortPuzzle>();
+        if (log == null) { Debug.LogError("[SelfTest14] no EsLogSortPuzzle"); return; }
+
+        uint[] vals = new uint[log.packetHex.Length];
+        for (int i = 0; i < vals.Length; i++) vals[i] = EsLogSortPuzzle.ParseHex(log.packetHex[i]);
+        bool chrono = vals[0] < vals[1] && vals[1] < vals[2] && vals[2] < vals[3];
+        Debug.Log("[SelfTest14] packets chronological = " + chrono + "   "
+                  + (!chrono ? "FAIL" : "PASS"));
+        if (!chrono) fails++;
+
+        var want = EsLogSortPuzzle.SortedIndices(log.packetHex);
+        bool want0123 = want.Length == 4 && want[0] == 0 && want[1] == 1 && want[2] == 2 && want[3] == 3;
+        Debug.Log("[SelfTest14] sorted indices = " + string.Join(",", want) + "   "
+                  + (!want0123 ? "FAIL" : "PASS"));
+        if (!want0123) fails++;
+
+        var grid = log.grid;
+        log.grid = null;   // the gate needs play-mode power; the sort logic does not
+        log.DebugReset();
+        log.SetSlotsForTest(new int[] { 0, 1, 2, 3 });
+        string pin = log.DerivedPin();
+        bool okSolve = log.solved && pin == "3719";
+        Debug.Log("[SelfTest14] solved=" + log.solved + " pin=" + pin + "   "
+                  + (!okSolve ? "FAIL" : "PASS (3719)"));
+        if (!okSolve) fails++;
+
+        log.DebugReset();
+        log.SetSlotsForTest(new int[] { 2, 0, 3, 1 });
+        bool okReject = !log.solved;
+        Debug.Log("[SelfTest14] scrambled accepted = " + log.solved + "   "
+                  + (!okReject ? "FAIL" : "PASS (refused)"));
+        if (!okReject) fails++;
+
+        log.DebugReset();
+        log.grid = grid;
+        Debug.Log("[SelfTest14] VERDICT = " + (fails == 0 ? "PASS (4/4)" : "FAIL (" + fails + ")"));
+    }
+
+    /// <summary>Self Test 15: plates seat, gabarito rotations OR to digit 4,
+    /// the reader latches and the door opens. Full scene drive with restore.</summary>
+    [MenuItem("Tools/Escape Room/Self Test 15 - plates OR to digit 4 and open the door")]
+    public static void SelfTest15Plates()
+    {
+        int fails = 0;
+        var reader = Object.FindFirstObjectByType<EsPlateReader>();
+        if (reader == null) { Debug.LogError("[SelfTest15] no EsPlateReader"); return; }
+        var door = Object.FindFirstObjectByType<BlastDoor>();
+        if (door == null) { Debug.LogError("[SelfTest15] no BlastDoor"); return; }
+        var plates = Object.FindObjectsByType<EsAcrylicPlate>(FindObjectsSortMode.None);
+        if (plates.Length != 3) { Debug.LogError("[SelfTest15] plates=" + plates.Length + " (want 3)"); return; }
+        System.Array.Sort(plates, (a, b) => a.plateId.CompareTo(b.plateId));
+
+        int[][] expectBase = new int[][]
+        {
+            new int[] { 0,1,0,0, 0,1,0,0, 0,0,0,0, 1,1,1,0 },
+            new int[] { 1,0,0,0, 0,0,0,0, 0,0,1,1, 0,0,0,0 },
+            new int[] { 0,0,1,0, 0,0,0,0, 0,0,1,0, 0,1,0,0 },
+        };
+        for (int i = 0; i < 3; i++)
+        {
+            bool same = true;
+            for (int k = 0; k < 16; k++) if (plates[i].baseCells[k] != expectBase[i][k]) same = false;
+            Debug.Log("[SelfTest15] plate " + (i + 1) + " base = " + (same ? "PASS" : "FAIL"));
+            if (!same) fails++;
+        }
+
+        int[] gab = new int[] { 0, 3, 2 };
+        int[] or = EsAcrylicPlate.OrCombine(plates[0].baseCells, gab[0],
+                                            plates[1].baseCells, gab[1],
+                                            plates[2].baseCells, gab[2]);
+        bool orOk = true;
+        for (int k = 0; k < 16; k++) if (or[k] != reader.templateCells[k]) orOk = false;
+        Debug.Log("[SelfTest15] OR at gabarito = digit 4: " + (orOk ? "PASS" : "FAIL"));
+        if (!orOk) fails++;
+
+        // full drive: seat, rotate, latch. Wire() explicitly: assembly reloads
+        // wipe non-serialized C# event subscriptions, so a build-time Wire
+        // may already be gone; in play Start() does this same call.
+        reader.Wire();
+        var saveParent = new Transform[3];
+        var savePos = new Vector3[3];
+        var saveRot = new Quaternion[3];
+        for (int i = 0; i < 3; i++)
+        {
+            var t = plates[i].transform;
+            saveParent[i] = t.parent; savePos[i] = t.localPosition; saveRot[i] = t.localRotation;
+            var g = plates[i].GetComponent<GrabbableItem>();
+            if (g != null && reader.sockets[i] != null) reader.sockets[i].Interact(g);
+        }
+        bool seated = reader.sockets[0].IsFilled && reader.sockets[1].IsFilled && reader.sockets[2].IsFilled;
+        Debug.Log("[SelfTest15] seated 3/3 = " + (seated ? "PASS" : "FAIL"));
+        if (!seated) fails++;
+
+        for (int i = 0; i < 3; i++)
+        {
+            var p = reader.SeatedPlate(i);
+            if (p == null) { Debug.LogError("[SelfTest15] slot " + i + " empty after seating"); fails++; continue; }
+            int want = gab[p.plateId];
+            p.SetRotationSilent(want);
+        }
+        bool locked = true;
+        foreach (var s in reader.sockets)
+            if (s != null && s.Item != null && !s.Item.pickupLocked) locked = false;
+        Debug.Log("[SelfTest15] seated plates pickup-locked = " + (locked ? "PASS" : "FAIL"));
+        if (!locked) fails++;
+
+        var tc = Object.FindFirstObjectByType<TerminalController>();
+        bool endWas = tc != null && tc.endPanel != null && tc.endPanel.activeSelf;
+        reader.CheckAndReward();
+        bool okWin = reader.approved && door.IsOpen;
+        Debug.Log("[SelfTest15] approved=" + reader.approved + " door open=" + door.IsOpen + "   "
+                  + (!okWin ? "FAIL" : "PASS (A.E.G.I.S. cleared)"));
+        if (!okWin) fails++;
+
+        // restore everything the drive touched
+        foreach (var s in reader.sockets) if (s != null) s.Reset();
+        for (int i = 0; i < 3; i++)
+        {
+            var g = plates[i].GetComponent<GrabbableItem>();
+            if (g != null) g.pickupLocked = false;
+            plates[i].SetRotationSilent(0);
+            var t = plates[i].transform;
+            t.SetParent(saveParent[i], false);
+            t.localPosition = savePos[i];
+            t.localRotation = saveRot[i];
+        }
+        reader.DebugReset();
+        door.DebugReset();
+        if (tc != null && tc.endPanel != null) tc.endPanel.SetActive(endWas);
+        Debug.Log("[SelfTest15] VERDICT = " + (fails == 0 ? "PASS (6/6)" : "FAIL (" + fails + ")")
+                  + " - scene restored");
+    }
+
     [MenuItem("Tools/Escape Room/Self Test 8 - end panel releases the mouse")]
     public static void SelfTest8EndPanelCursor()
     {
@@ -1468,7 +1971,6 @@ public static class EsSceneBuilder
         if (module == null) { Debug.LogError("[SelfTest8] no BaseInputModule"); return; }
 
         bool panelWas = tc.endPanel != null && tc.endPanel.activeSelf;
-        bool keypadWas = tc.keypadRoot != null && tc.keypadRoot.activeSelf;
         bool btnWas = tc.rebootButton != null && tc.rebootButton.gameObject.activeSelf;
         string savedTitle = tc.endTitle != null ? tc.endTitle.text : null;
         Color savedColor = tc.endTitle != null ? tc.endTitle.color : Color.white;
@@ -1488,7 +1990,6 @@ public static class EsSceneBuilder
                              : "FAIL - the cursor is still locked, so REINICIAR stays dead"));
 
         if (tc.endPanel != null) tc.endPanel.SetActive(panelWas);
-        if (tc.keypadRoot != null) tc.keypadRoot.SetActive(keypadWas);
         if (tc.rebootButton != null) tc.rebootButton.gameObject.SetActive(btnWas);
         if (tc.endTitle != null) { tc.endTitle.text = savedTitle; tc.endTitle.color = savedColor; }
         if (tc.endBody != null) tc.endBody.text = savedBody;
@@ -4889,7 +5390,7 @@ public static class EsSceneBuilder
 
         // Measure the PLACED instance, not the prefab asset: the arch is scaled to 0.97 for a
         // reveal, so reading the asset (3.00 m) reported a false positive on every run.
-        foreach (var nm in new[] { "CardReader", "StatusLamp", "ExitSign", "Door_Arch_01_00" })
+        foreach (var nm in new[] { "SealPlate", "StatusLamp", "ExitSign", "Door_Arch_01_00" })
         {
             foreach (var t in Object.FindObjectsByType<Transform>(FindObjectsSortMode.None))
             {
@@ -4955,91 +5456,56 @@ public static class EsSceneBuilder
         Debug.Log("[SelfTest] reserve running       = " + (gm != null && gm.IsRunning));
     }
 
-    [MenuItem("Tools/Escape Room/Self Test 2 - Enter code 86 on the keypad")]
+    [MenuItem("Tools/Escape Room/Self Test 2 - Enter PIN 3719 on the safe")]
     public static void SelfTest2()
     {
-        var tc = Object.FindAnyObjectByType<TerminalController>();
-        if (tc == null) { Debug.LogError("[SelfTest] TerminalController not found."); return; }
-        if (tc.keypadRoot == null) { Debug.LogError("[SelfTest] keypadRoot is NULL"); return; }
+        // Drives the real safe buttons (play mode: Start wired the listeners).
+        // Self-contained: resets first, so running after a solved safe is still valid.
+        var pad = Object.FindFirstObjectByType<EsSafeKeypad>();
+        if (pad == null) { Debug.LogError("[SelfTest2] no EsSafeKeypad in the scene"); return; }
+        if (pad.keypadRoot == null) { Debug.LogError("[SelfTest2] keypadRoot is NULL"); return; }
+        pad.DebugReset();
 
-        Debug.Log("[SelfTest] phase BEFORE = " + tc.Phase + "   (expect AwaitingCode)");
-
-        // press the real keypad buttons: 8, then 6, then ENTER. The confirm key used to be labelled
-        // "C", which nobody reads as "submit" - the player reported being unable to press enter
-        // after typing the code, and the key that did it was called C. So the label is asserted
-        // separately in Self Test 6, and here the whole chain has to actually grant.
         int allFound = 1;
-        foreach (var cap in new[] { "8", "6", "ENTER" })
+        foreach (var cap in new[] { "3", "7", "1", "9", "ENTER" })
         {
             bool pressed = false;
-            for (int i = 0; i < tc.keypadRoot.transform.childCount; i++)
+            for (int i = 0; i < pad.keypadRoot.transform.childCount; i++)
             {
-                var b = tc.keypadRoot.transform.GetChild(i).GetComponent<UnityEngine.UI.Button>();
-                var lbl = tc.keypadRoot.transform.GetChild(i).GetComponentInChildren<UnityEngine.UI.Text>();
+                var b = pad.keypadRoot.transform.GetChild(i).GetComponent<UnityEngine.UI.Button>();
+                var lbl = pad.keypadRoot.transform.GetChild(i).GetComponentInChildren<UnityEngine.UI.Text>();
                 if (b != null && lbl != null && lbl.text == cap) { b.onClick.Invoke(); pressed = true; break; }
             }
             if (!pressed) allFound = 0;
-            Debug.Log("[SelfTest] pressed '" + cap + "' -> found=" + pressed);
+            Debug.Log("[SelfTest2] pressed '" + cap + "' -> found=" + pressed);
         }
 
-        Debug.Log("[SelfTest] phase AFTER  = " + tc.Phase + "   (expect Granted)");
-        Debug.Log("[SelfTest] VERDICT = " + ((allFound == 1 && tc.Phase == TerminalPhase.Granted)
-                  ? "PASS (8, 6, ENTER granted)" : "FAIL"));
-        if (tc.keySocket != null) Debug.Log("[SelfTest] keySocket filled  = " + tc.keySocket.IsFilled + " (expect False)");
-        if (tc.cellSocket != null) Debug.Log("[SelfTest] cellSocket filled = " + tc.cellSocket.IsFilled + " (expect False)");
-        if (tc.releaseCard != null) Debug.Log("[SelfTest] releaseCard active = " + tc.releaseCard.gameObject.activeInHierarchy + " (expect False)");
+        Debug.Log("[SelfTest2] VERDICT = " + ((allFound == 1 && pad.solved)
+                  ? "PASS (3, 7, 1, 9, ENTER opened the safe)" : "FAIL"));
     }
 
-    [MenuItem("Tools/Escape Room/Self Test 3 - Wrong code 11 (must be refused)")]
+    [MenuItem("Tools/Escape Room/Self Test 3 - Wrong PIN 1111 (must be refused)")]
     public static void SelfTest3()
     {
-        var tc = Object.FindAnyObjectByType<TerminalController>();
-        if (tc == null) { Debug.LogError("[SelfTest] TerminalController not found."); return; }
-        Debug.Log("[SelfTest] phase BEFORE = " + tc.Phase);
-        foreach (var cap in new[] { "1", "1", "C" })
+        var pad = Object.FindFirstObjectByType<EsSafeKeypad>();
+        if (pad == null) { Debug.LogError("[SelfTest3] no EsSafeKeypad in the scene"); return; }
+        if (pad.keypadRoot == null) { Debug.LogError("[SelfTest3] keypadRoot is NULL"); return; }
+        pad.DebugReset();
+
+        foreach (var cap in new[] { "1", "1", "1", "1", "ENTER" })
         {
-            for (int i = 0; i < tc.keypadRoot.transform.childCount; i++)
+            for (int i = 0; i < pad.keypadRoot.transform.childCount; i++)
             {
-                var b = tc.keypadRoot.transform.GetChild(i).GetComponent<UnityEngine.UI.Button>();
-                var lbl = tc.keypadRoot.transform.GetChild(i).GetComponentInChildren<UnityEngine.UI.Text>();
+                var b = pad.keypadRoot.transform.GetChild(i).GetComponent<UnityEngine.UI.Button>();
+                var lbl = pad.keypadRoot.transform.GetChild(i).GetComponentInChildren<UnityEngine.UI.Text>();
                 if (b != null && lbl != null && lbl.text == cap) { b.onClick.Invoke(); break; }
             }
         }
-        Debug.Log("[SelfTest] phase AFTER wrong code = " + tc.Phase + "   (expect UNCHANGED / still AwaitingCode)");
+        bool refused = !pad.solved;
+        Debug.Log("[SelfTest3] wrong PIN refused = " + refused + "   "
+                  + (refused ? "PASS (safe stays shut)" : "FAIL (wrong PIN opened the safe)"));
     }
 
-    [MenuItem("Tools/Escape Room/Self Test 4 - Item insertion + order rule")]
-    public static void SelfTest4()
-    {
-        var tc = Object.FindAnyObjectByType<TerminalController>();
-        if (tc == null) { Debug.LogError("[SelfTest] TerminalController not found."); return; }
-        Debug.Log("[SelfTest] phase = " + tc.Phase + "   (expect Granted)");
-
-        GrabbableItem key = null, cell = null;
-        foreach (var it in Object.FindObjectsByType<GrabbableItem>(FindObjectsSortMode.None))
-        {
-            if (it.itemKey == "chave") key = it;
-            else if (it.itemKey == "celula") cell = it;
-        }
-        if (key == null || cell == null) { Debug.LogError("[SelfTest] items not found"); return; }
-        Debug.Log("[SelfTest] found key=" + (key != null) + " cell=" + (cell != null));
-
-        // --- WRONG ORDER FIRST: the cell must be refused while the key slot is still empty
-        bool cellAccepted = tc.cellSocket.Interact(cell);
-        Debug.Log("[SelfTest] cell inserted FIRST -> consumed=" + cellAccepted + "  (expect False)");
-        Debug.Log("[SelfTest]   phase = " + tc.Phase + "  (expect Granted, unchanged)");
-        Debug.Log("[SelfTest]   cellSocket filled = " + tc.cellSocket.IsFilled + "  (expect False)");
-
-        // --- RIGHT ORDER: key, then cell
-        bool keyAccepted = tc.keySocket.Interact(key);
-        Debug.Log("[SelfTest] key inserted -> consumed=" + keyAccepted + "  (expect True)");
-        Debug.Log("[SelfTest]   phase = " + tc.Phase + "  (expect AwaitingCell)");
-
-        bool cellOk = tc.cellSocket.Interact(cell);
-        Debug.Log("[SelfTest] cell inserted -> consumed=" + cellOk + "  (expect True)");
-        Debug.Log("[SelfTest]   phase = " + tc.Phase + "  (expect Authorized)");
-        Debug.Log("[SelfTest] releaseCard active = " + (tc.releaseCard != null && tc.releaseCard.gameObject.activeInHierarchy) + "  (expect True)");
-    }
 
     // =====================================================================
     // ROOM RE-IMPROVEMENT
@@ -5692,15 +6158,6 @@ public static class EsSceneBuilder
                              + "fillers will render untextured.");
 
         _gold     = Mat("M_Gold",     EsTheme.KeyGold,  0.75f, 0.65f, EsTheme.KeyGold, 0.35f);
-        // The key's own three materials. Kept apart from _gold, which stays for the locker label and
-        // the pipe row: retinting _gold to fix the key would have restyled three other things that
-        // were not part of the complaint. Gunmetal is matte and rough on purpose - a polished
-        // metal at smoothness 0.65 is what made the prop read as jewellery (D-111).
-        _keyBody  = Mat("M_KeyBody",  new Color32(0x5A,0x64,0x70,0xFF), 0.85f, 0.32f, Color.black, 0f);
-        _keyBrass = Mat("M_KeyBrass", new Color32(0xB0,0x8D,0x3F,0xFF), 0.90f, 0.42f, Color.black, 0f);
-        _keyGlow  = Mat("M_KeyGlow",  EsTheme.KeyAccent, 0.00f, 0.50f, EsTheme.KeyAccent, 1.20f);
-        _green    = Mat("M_Cell",     EsTheme.CellGreen,0.40f, 0.55f, EsTheme.CellGreen, 0.60f);
-        _cyan     = Mat("M_Card",     EsTheme.CardCyan, 0.30f, 0.60f, EsTheme.CardCyan, 0.90f);
         _glowOn   = Mat("M_GlowOn",   EsTheme.ScreenOn, 0.00f, 0.50f, EsTheme.ScreenOn, 2.20f);
         _alarm    = Mat("M_Alarm",    new Color(1,1,1), 0.00f, 0.40f, Color.black,   0f);
         _paper    = Mat("M_Paper",    new Color32(0xD8,0xD2,0xC0,0xFF), 0f, 0.10f, Color.black, 0f);
@@ -5710,7 +6167,39 @@ public static class EsSceneBuilder
         // near-black, fully rough: any sliver of it that shows through a seam must read as
         // shadow, never as sky (D-41)
         _void     = Mat("M_VoidBlock", new Color(0.012f, 0.014f, 0.018f), 0f, 0f, Color.black, 0f);
-        _card     = _cyan;
+        // --- dressing palette (Filial 9 ambience pass)
+        _carpet   = Mat("M_Carpet",   new Color32(0x23,0x2A,0x3A,0xFF), 0f, 0.95f, Color.black, 0f);
+        _belt     = Mat("M_Belt",     new Color32(0x1E,0x2A,0x52,0xFF), 0f, 0.90f, Color.black, 0f);
+        _screenOff= Mat("M_ScreenOff",new Color32(0x05,0x07,0x0A,0xFF), 0.20f, 0.60f, Color.black, 0f);
+        _panelGlow= Mat("M_PanelGlow",new Color(0.85f, 0.95f, 1f), 0f, 0.40f, new Color(0.75f, 0.90f, 1f), 2.4f);
+        _cabRed   = Mat("M_CabRed",   new Color32(0x8C,0x1A,0x12,0xFF), 0.30f, 0.45f, Color.black, 0f);
+        // Exposed fibre-optic runs (A.E.G.I.S. Fase 0): dark sheath, red emergency glow.
+        _fiber    = Mat("M_Fiber",    new Color32(0x1A,0x08,0x08,0xFF), 0f, 0.40f, new Color(1f, 0.20f, 0.15f), 2.0f);
+        // Hex mesh puzzle (Fase 1): dark tile, dim-red dead ports, cyan live ports,
+        // amber emitter/receptor bodies. Assets, never runtime (D-23/D-49).
+        _hexBase  = Mat("M_HexBase",  new Color32(0x16,0x1A,0x1F,0xFF), 0.60f, 0.35f, Color.black, 0f);
+        _hexDim   = Mat("M_HexDim",   new Color32(0x3A,0x0E,0x0C,0xFF), 0f, 0.50f, new Color(0.85f, 0.12f, 0.12f), 0.2f);
+        _hexLive  = Mat("M_HexLive",  EsTheme.CardCyan, 0f, 0.50f, EsTheme.CardCyan, 2.0f);
+        _hexSrc   = Mat("M_HexSrc",   new Color32(0x4A,0x32,0x0E,0xFF), 0.30f, 0.40f, EsTheme.KeyAccent, 1.2f);
+        // Live tile body (Fase 1b readability): the whole hex glows so the route
+        // reads as one shape instead of scattered pips.
+        _hexLiveTile = Mat("M_HexLiveTile", new Color32(0x0A,0x2A,0x30,0xFF), 0f, 0.50f, EsTheme.CardCyan, 1.2f);
+        // Single-pip leaves (D-183): slate-teal bodies so the ends-to-plug read
+        // before anything lights; teal-cyan when live, distinct from route cyan.
+        _hexLeaf = Mat("M_HexLeaf", new Color32(0x1E,0x2E,0x3A,0xFF), 0.30f, 0.40f, new Color(0.10f, 0.35f, 0.45f), 0.5f);
+        _hexLeafLive = Mat("M_HexLeafLive", new Color32(0x0C,0x3A,0x40,0xFF), 0f, 0.50f, new Color(0.15f, 0.85f, 0.80f), 1.6f);
+        _frost    = Mat("M_Frost",    new Color(0.55f, 0.85f, 0.95f, 0.45f), 0.10f, 0.60f,
+                        new Color(0.30f, 0.70f, 0.90f), 0.35f);
+        // transparent URP/Lit, guarded like everything else (D-23): without this the
+        // alpha in the base colour is ignored and the "ice" renders as solid plastic.
+        if (_frost.HasProperty("_Surface")) _frost.SetFloat("_Surface", 1f);
+        if (_frost.HasProperty("_Blend")) _frost.SetFloat("_Blend", 0f);
+        if (_frost.HasProperty("_SrcBlend")) _frost.SetFloat("_SrcBlend", 1f);
+        if (_frost.HasProperty("_DstBlend")) _frost.SetFloat("_DstBlend", 10f);
+        if (_frost.HasProperty("_ZWrite")) _frost.SetFloat("_ZWrite", 0f);
+        _frost.SetOverrideTag("RenderType", "Transparent");
+        _frost.renderQueue = 3000;
+        if (_frost.HasProperty("_Surface")) _frost.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
         AssetDatabase.SaveAssets();
     }
 
@@ -5800,12 +6289,12 @@ public static class EsSceneBuilder
         var bg = EsUi.Img(canvasGo.transform, "Bg", EsTheme.ScreenBg);
         EsUi.Stretch(bg.rectTransform);
 
-        var title = EsUi.Label(canvasGo.transform, "TitleText", "TERMINAL 09 - AUTOATENDIMENTO",
+        var title = EsUi.Label(canvasGo.transform, "TitleText", "NO-ZERO // TERMINAL A.E.G.I.S.",
                               54, EsTheme.ScreenOn * 0.75f, TextAnchor.UpperCenter, FontStyle.Bold);
         title.rectTransform.anchorMin = new Vector2(0, 1); title.rectTransform.anchorMax = new Vector2(1, 1);
         title.rectTransform.offsetMin = new Vector2(0, -130); title.rectTransform.offsetMax = new Vector2(0, -30);
 
-        var status = EsUi.Label(canvasGo.transform, "StatusText", "SISTEMA OFFLINE",
+        var status = EsUi.Label(canvasGo.transform, "StatusText", "QUARENTENA ABSOLUTA - SISTEMAS OFFLINE",
                                 62, EsTheme.Warn, TextAnchor.MiddleCenter, FontStyle.Bold);
         status.rectTransform.anchorMin = new Vector2(0, 1); status.rectTransform.anchorMax = new Vector2(1, 1);
         status.rectTransform.offsetMin = new Vector2(40, -290); status.rectTransform.offsetMax = new Vector2(-40, -160);
@@ -5822,9 +6311,9 @@ public static class EsSceneBuilder
         // pixels - a 4 px tall target is not clickable no matter how correct the wiring is.
         //
         // Placement is constrained, so it is derived rather than eyeballed. On this 1920x1080
-        // canvas, measured from the bottom: StatusText occupies 790..920, the keypad that
-        // replaces this button occupies 20..480, and the hint text (500..570) only appears in
-        // AwaitingCode, i.e. once the button is already hidden, so it is not a constraint. That
+        // canvas, measured from the bottom: StatusText occupies 790..920, and the hint
+        // text (500..570) only appears once the button is already hidden, so it is not
+        // a constraint. That
         // leaves a 310 unit band (480..790) and a 240 unit button centred in it clears both
         // neighbours by 35 units. An earlier 280 unit button centred at y=180 spanned 580..860
         // and ate 70 units into StatusText, which is the "SISTEMA OFFLINE is overlapping
@@ -5847,75 +6336,6 @@ public static class EsSceneBuilder
         // IPointerEnterHandler - see EsHoverHighlight for why the usual mechanism would lie here.
         if (rrt2.GetComponent<EsHoverHighlight>() == null) rrt2.gameObject.AddComponent<EsHoverHighlight>();
 
-        // ---- keypad (revealed after reboot)
-        var keypad = new GameObject("Keypad", typeof(RectTransform));
-        keypad.transform.SetParent(canvasGo.transform, false);
-        var krt = (RectTransform)keypad.transform;
-        krt.anchorMin = new Vector2(0, 0); krt.anchorMax = new Vector2(1, 0);
-        krt.offsetMin = new Vector2(70f, 30f); krt.offsetMax = new Vector2(-70f, 705f);
-        keypad.SetActive(false);
-
-        // The keypad is the player typing an answer, so it is marked as puzzle input: its keys are
-        // judged against the tight radius only, while the rest of the panel gets the loose one.
-        // That split is what makes the terminal reachable from across the room without the aiming
-        // aid ever reaching the digits.
-        if (keypad.GetComponent<EsPuzzleInput>() == null)
-        {
-            var mark = keypad.AddComponent<EsPuzzleInput>();
-            mark.what = "the 2-digit survival code";
-        }
-
-        var echo = EsUi.Label(keypad.transform, "KeypadEcho", "__", 72, EsTheme.Amber,
-                              TextAnchor.MiddleCenter, FontStyle.Bold);
-        echo.rectTransform.anchorMin = new Vector2(0, 1); echo.rectTransform.anchorMax = new Vector2(1, 1);
-        echo.rectTransform.offsetMin = new Vector2(0, -90); echo.rectTransform.offsetMax = new Vector2(0, 0);
-
-        // The keypad was rebuilt, not just padded. Keys were 300x72 canvas units = 0.27 x 0.065 m,
-        // and 6.5 cm is the worst target in the build - about 8 px tall from the spawn distance.
-        // At 340x130 they are 0.31 x 0.117 m, so 80% taller. The grid needed the extra room because
-        // the post-reboot band is bounded: the button that used to occupy canvas y 515..755 is
-        // hidden once the terminal is up, and the hint moved above the keypad to make room.
-        //   keys   30..600 | echo 615..705 | hint 725..775 | StatusText starts at 790
-        // Widths centre 3*340 + 2*16 = 1052 inside the 1780 px keypad region: (1780-1052)/2 = 364.
-        string[] caps = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "DEL", "ENTER" };
-        const int cols = 3;
-        const float cw = 340f, ch = 130f, gap = 16f, x0 = 364f, y0 = 105f;
-        for (int i = 0; i < caps.Length; i++)
-        {
-            int cx = i % cols, cy = i / cols;
-            string cap = caps[i];
-            bool special = cap == "ENTER" || cap == "DEL";
-            // "ENTER" is five characters where the others are one to three, and the key face is
-            // only 340 units wide, so the two word keys get a smaller face. 34 pt fits ENTER with
-            // room to spare; 50 pt would have overflowed, and an overflowing label on a confirm key
-            // is worse than a small one.
-            int size = special ? 34 : 50;
-            // Three distinct plates, not two. DEL is red because it is the destructive action and
-            // red is what a player already expects from that; ENTER is green-amber because it is
-            // the one the whole keypad exists to serve. When they shared a brown plate the confirm
-            // key read as just another modifier.
-            Color plate, text;
-            if (cap == "ENTER") { plate = new Color(0.20f, 0.46f, 0.16f, 1f); text = EsTheme.Amber; }
-            else if (cap == "DEL") { plate = new Color(0.46f, 0.11f, 0.09f, 1f); text = EsTheme.Warn; }
-            else { plate = new Color(0.07f, 0.22f, 0.19f, 1f); text = EsTheme.ScreenOn; }
-
-            var b = EsUi.ButtonWithLabel(keypad.transform, "Key_" + cap, cap, size, plate, text);
-            var brt = (RectTransform)b.transform;
-            brt.anchorMin = brt.anchorMax = new Vector2(0, 1);
-            brt.pivot = new Vector2(0, 1);
-            brt.sizeDelta = new Vector2(cw, ch);
-            brt.anchoredPosition = new Vector2(x0 + cx * (cw + gap), -y0 - cy * (ch + gap));
-
-            // Same size as the key, lifted 1.5 cm toward the viewer. No padding at all: the earlier
-            // padded version used 48 units on a 12 unit gutter, which reached past the gutter into
-            // the face of the key above, and since the lower key is later in hierarchy order it won
-            // the contested band - clicking the bottom half of "2" typed "5". Matching the face
-            // removes that class of bug by construction, and nothing is lost, because the keys
-            // themselves are already 80% taller than they used to be.
-            AddHitTarget(brt, 0.015f, "_Key");
-            if (b.GetComponent<EsHoverHighlight>() == null) b.gameObject.AddComponent<EsHoverHighlight>();
-        }
-
         var hint = EsUi.Label(canvasGo.transform, "HintText", "", 44, EsTheme.Amber, TextAnchor.LowerCenter);
         hint.rectTransform.anchorMin = new Vector2(0, 0); hint.rectTransform.anchorMax = new Vector2(1, 0);
         hint.rectTransform.offsetMin = new Vector2(30f, 725f); hint.rectTransform.offsetMax = new Vector2(-30f, 775f);
@@ -5926,72 +6346,16 @@ public static class EsSceneBuilder
         Canvas endOverlay = BuildEndOverlay(root, out GameObject endPanel, out Text endTitle,
                                             out Text endBody, out Button restart);
 
-        // ---- sockets. Kept BELOW the screen (canvas bottom edge is y=0.915): at y=0.95 they
-        //      overlapped the keypad and the player could not tell them apart from the UI.
-        var keySlot = MakeSocket(t.transform, "KeySlot", new Vector3(-0.55f, 0.64f, 0.10f),
-                                 "chave", "CHAVE DE ACESSO", _gold);
-        var cellSlot = MakeSocket(t.transform, "CellSlot", new Vector3(0.55f, 0.64f, 0.10f),
-                                  "celula", "CELULA DE ENERGIA", _green);
-
-        // ---- locker: a real CAVITY (5 panels, open front). A solid box would either hide the
-        //      items forever, or leave them sitting outside where the player can grab them
-        //      without ever entering the credential - which would break the puzzle gate.
-        var locker = new GameObject("Locker");
-        locker.transform.SetParent(t.transform, false);
-        locker.transform.localPosition = new Vector3(2.05f, 0f, 0f);
-        const float LW = 1.30f, LH = 1.70f, LD = 1.00f;
-        EsTheme.Box("LockerBack",  locker.transform, new Vector3(0f, LH * 0.5f, -LD * 0.5f), new Vector3(LW, LH, 0.06f), _shell);
-        EsTheme.Box("LockerLeft",  locker.transform, new Vector3(-LW * 0.5f, LH * 0.5f, 0f), new Vector3(0.06f, LH, LD), _shell);
-        EsTheme.Box("LockerRight", locker.transform, new Vector3(LW * 0.5f, LH * 0.5f, 0f), new Vector3(0.06f, LH, LD), _shell);
-        EsTheme.Box("LockerTop",   locker.transform, new Vector3(0f, LH, 0f), new Vector3(LW, 0.06f, LD), _shell);
-        EsTheme.Box("LockerShelf", locker.transform, new Vector3(0f, 0.06f, 0f), new Vector3(LW, 0.06f, LD), _metal);
-        // interior: x[-0.59,0.59] y[0.09,1.64] z[-0.44,0.50]
-        var seat = new GameObject("ItemSeat");
-        seat.transform.SetParent(locker.transform, false);
-        seat.transform.localPosition = new Vector3(0f, 0.80f, -0.05f);
-        // hinge on the left edge; -95 deg swings the leaf outward (+z)
-        var hinge = new GameObject("LockerDoorPivot");
-        hinge.transform.SetParent(locker.transform, false);
-        hinge.transform.localPosition = new Vector3(-LW * 0.5f, 0f, LD * 0.5f);
-        EsTheme.Box("LockerDoor", hinge.transform, new Vector3(LW * 0.5f, LH * 0.5f, 0f),
-                    new Vector3(LW, LH, 0.08f), _metal);
-
-        // A key and a cell, as real geometry rather than coloured slabs - see KeyModel/CellModel
-        // for why no CC0 pack was used. FinishItem fits the collider to the rendered bounds, so a
-        // key with a bow on it still gets one correct hitbox.
-        var key = FinishItem(KeyModel(seat.transform, Vector3.zero, _keyBody, _keyBrass, _keyGlow),
-                             seat.transform,
-                             "ChaveDeAcesso", new Vector3(-0.28f, 0.06f, 0f),
-                             "chave", "Chave de Acesso", 0.25f);
-        var cell = FinishItem(CellModel(seat.transform, Vector3.zero, _green, _glowOn), seat.transform,
-                              "CelulaDeEnergia", new Vector3(0.28f, -0.06f, 0f),
-                              "celula", "Celula de Energia", 0.6f);
-
-        // ---- card dispenser tray
-        var tray = new GameObject("CardTray");
-        tray.transform.SetParent(t.transform, false);
-        tray.transform.localPosition = new Vector3(0f, 0.30f, 0.14f);
-        EsTheme.Box("Shelf", tray.transform, new Vector3(0f, -0.16f, 0f), new Vector3(0.9f, 0.05f, 0.35f), _metal);
-        var card = MakeItem(tray.transform, "CartaoDeLiberacao", Vector3.zero, "cartao",
-                            "Cartao de Liberacao", new Vector3(0.42f, 0.015f, 0.26f), _card);
-        card.gameObject.SetActive(false);
-
-        // ---- controller
+        // ---- controller: reboot, timer and the objective line only. The old
+        // credential/key/cell/card chain is gone (D-190): the three puzzles
+        // own their state (hex, log sort, safe PIN, plate reader).
         var tc = t.AddComponent<TerminalController>();
-        tc.correctCode = "86";
-        tc.keySocket = keySlot;
-        tc.cellSocket = cellSlot;
-        tc.lockerDoor = hinge.transform;
-        tc.cardAnchor = tray.transform;
-        tc.releaseCard = card;
         tc.screenLight = pl;
         tc.screenPanel = screen.GetComponent<Renderer>();
         tc.titleText = title;
         tc.statusText = status;
         tc.timerText = timer;
         tc.rebootButton = reboot;
-        tc.keypadRoot = keypad;
-        tc.keypadEcho = echo;
         tc.hintText = hint;
         tc.endPanel = endPanel;
         tc.endTitle = endTitle;
@@ -5999,14 +6363,7 @@ public static class EsSceneBuilder
         tc.restartButton = restart;
         tc.clickClip = Clip("ui_click");
         tc.powerUpClip = Clip("power_up");
-        tc.errorClip = Clip("error_buzz");
-        tc.chimeClip = Clip("unlock_chime");
-        tc.dispenseClip = Clip("dispense");
         tc.alarmClip = Clip("alarm_beep");
-        keySlot.acceptClip = Clip("lock_insert");
-        keySlot.rejectClip = Clip("error_buzz");
-        cellSlot.acceptClip = Clip("lock_insert");
-        cellSlot.rejectClip = Clip("error_buzz");
         return tc;
     }
 
@@ -6024,136 +6381,13 @@ public static class EsSceneBuilder
         return s;
     }
 
-    /// <summary>Builds the access key as an actual key: bow, shaft, two teeth, collar.
-    ///
-    /// The KayKit / Kenney / Quaternius CC0 packs were checked first and none of them ships a key
-    /// or an energy cell (D-101). For a prop this small, read at 1.9 m in the player's hand,
-    /// hand-built geometry beats a downloaded model: it needs no scale fitting, no re-material to
-    /// match the room's URP/Lit gold, and no collider guesswork. The previous version was a single
-    /// 34 x 7 x 12 cm gold slab, which read as a domino rather than a key.
-    ///
-    /// The parent is an empty with the collider, rigidbody and GrabbableItem; this only supplies
-    /// the visual, and every part shares the one material so it looks cast rather than assembled.
-    /// </summary>
-    static GameObject KeyModel(Transform parent, Vector3 pos, Material bodyMat, Material accentMat,
-                               Material glowMat)
-    {
-        var root = new GameObject("ChaveDeAcesso");
-        root.transform.SetParent(parent, false);
-        root.transform.localPosition = pos;
-        root.transform.localRotation = Quaternion.Euler(0f, 0f, 0f);
-
-        const float T = 0.008f;
-        const float W = 0.030f;          // stock width
-
-        // The key was ONE polished-gold material, and that is what did not match the room: #D8B040
-        // at metallic 0.75 and smoothness 0.65 reads as treasure, not as access hardware, sitting in
-        // a room of cyan screens, steel and concrete. It is now TWO metals plus one lit accent -
-        // matte gunmetal for the mass, brass only where the key silhouette is read from, and a thin
-        // amber band that says "powered" (D-111).
-        //
-        // Amber, not cyan, on purpose. The card is cyan and the cell is green, so tinting the key
-        // with either would hand the player a colour that already means a different object. Amber
-        // belongs to nothing else in the locker and already reads as "confirm" on the keypad
-        // (D-93), so it marks the key without impersonating either prop.
-
-        // bow: four bars forming a ring, so it reads as a hole you can see through
-        const float R = 0.052f;          // outer radius of the bow
-        const float BORE = 0.026f;       // inner radius
-        for (int i = 0; i < 4; i++)
-        {
-            float a = i * 90f;
-            float mid = (R + BORE) * 0.5f;
-            var bar = EsTheme.Box("BowBar" + i, root.transform,
-                new Vector3(0f, -mid, 0f), new Vector3(R * 2f, (R - BORE), T), bodyMat);
-            bar.transform.localRotation = Quaternion.Euler(0f, 0f, a);
-        }
-
-        // shaft from the bow to the teeth
-        float shaftLen = 0.115f;
-        var shaft = EsTheme.Box("Shaft", root.transform,
-            new Vector3(R + shaftLen * 0.5f, 0f, 0f), new Vector3(shaftLen, W, T), bodyMat);
-
-        // collar, the detail that makes it read as a machined key and not a nail
-        EsTheme.Box("Collar", root.transform,
-            new Vector3(R + 0.012f, 0f, 0f), new Vector3(0.012f, W * 1.7f, T * 1.7f), accentMat);
-
-        // two teeth, cut at the tip
-        EsTheme.Box("Tooth_A", root.transform,
-            new Vector3(R + shaftLen - 0.030f, W * 0.5f + 0.008f, 0f),
-            new Vector3(0.016f, 0.022f, T), accentMat);
-        EsTheme.Box("Tooth_B", root.transform,
-            new Vector3(R + shaftLen - 0.010f, W * 0.5f + 0.006f, 0f),
-            new Vector3(0.014f, 0.018f, T), accentMat);
-
-        // The lit band, across the bow and proud of both faces so it is not buried inside the ring
-        // it sits in. 6 mm across on a 30 mm key catches the eye at arm's length without turning
-        // the prop into a lamp, and it is a separate part so FinishItem's collider still fits the
-        // whole silhouette.
-        EsTheme.Box("PowerBand", root.transform,
-            new Vector3(0f, -(R + BORE) * 0.5f, 0f),
-            new Vector3((R - BORE) * 1.9f, 0.006f, T * 1.6f), glowMat);
-
-        return root;
-    }
-
-    /// <summary>Builds the energy cell as a cell: ribbed body, terminal cap, base rim, charge band.
-    /// Same reasoning as <see cref="KeyModel"/> - no CC0 pack has one, and a 16 cm green box is not
-    /// a battery. The charge band is a separate emissive-looking part so the object has a readable
-    /// front and back at hand distance.</summary>
-    static GameObject CellModel(Transform parent, Vector3 pos, Material mat, Material bandMat)
-    {
-        var root = new GameObject("CelulaDeEnergia");
-        root.transform.SetParent(parent, false);
-        root.transform.localPosition = pos;
-        // stand upright, terminal up, so it reads as a cell and not a block
-        root.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
-
-        const float R = 0.048f;
-        const float H = 0.20f;
-
-        var body = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        body.name = "Body";
-        body.transform.SetParent(root.transform, false);
-        body.transform.localScale = new Vector3(R * 2f, H * 0.5f, R * 2f);
-        body.GetComponent<MeshRenderer>().sharedMaterial = mat;
-        // the primitive's own collider is redundant: the root gets one fitted to the bounds, and a
-        // child collider on a Rigidbody parent is a classic source of phantom contacts
-        Object.DestroyImmediate(body.GetComponent<Collider>());
-
-        // terminal cap: slightly proud, so the top is not a flat disc
-        var cap = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        cap.name = "Terminal";
-        cap.transform.SetParent(root.transform, false);
-        cap.transform.localScale = new Vector3(R * 1.25f, 0.012f, R * 1.25f);
-        cap.GetComponent<MeshRenderer>().sharedMaterial = mat;
-        Object.DestroyImmediate(cap.GetComponent<Collider>());
-
-        // base rim
-        var rim = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        rim.name = "Rim";
-        rim.transform.SetParent(root.transform, false);
-        rim.transform.localScale = new Vector3(R * 2.15f, 0.010f, R * 2.15f);
-        rim.GetComponent<MeshRenderer>().sharedMaterial = mat;
-        Object.DestroyImmediate(rim.GetComponent<Collider>());
-
-        // charge band around the middle, in the accent material
-        var band = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        band.name = "ChargeBand";
-        band.transform.SetParent(root.transform, false);
-        band.transform.localScale = new Vector3(R * 2.08f, 0.022f, R * 2.08f);
-        band.GetComponent<MeshRenderer>().sharedMaterial = bandMat != null ? bandMat : mat;
-        Object.DestroyImmediate(band.GetComponent<Collider>());
-
-        return root;
-    }
 
     /// <summary>Wraps a visual-only GameObject in an interactable: one collider fitted to the
     /// combined bounds of all its meshes, one rigidbody, one GrabbableItem.
     ///
     /// The collider is fitted to the RENDERED bounds rather than assumed from a size parameter,
-    /// which is the whole point of the models above being multi-part - a box of guessed dimensions
-    /// would be wrong for a key with a bow on it, and D-55 already paid for guessing colliders once
+    /// which is the whole point of multi-part models - a box of guessed dimensions
+    /// would be wrong for a plate with a frame on it, and D-55 already paid for guessing colliders once
     /// when the kit's Column_01_Top shipped without one and the player walked through it.
     /// </summary>
     static GrabbableItem FinishItem(GameObject visual, Transform parent, string name, Vector3 pos,
@@ -6188,19 +6422,6 @@ public static class EsSceneBuilder
         return it;
     }
 
-    static GrabbableItem MakeItem(Transform parent, string name, Vector3 pos, string key,
-                                  string label, Vector3 size, Material mat)
-    {
-        var go = EsTheme.Box(name, parent, pos, size, mat);
-        var rb = go.AddComponent<Rigidbody>();
-        rb.mass = 0.8f;
-        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-        var it = go.AddComponent<GrabbableItem>();
-        it.itemKey = key;
-        it.displayName = label;
-        return it;
-    }
-
     // =====================================================================
     // blast door
     // =====================================================================
@@ -6229,23 +6450,12 @@ public static class EsSceneBuilder
         var lampGo = EsTheme.Box("StatusLamp", d.transform, new Vector3(0f, 2.30f, 0.10f),
                                  new Vector3(0.60f, 0.10f, 0.06f), _alarm);
 
-        // Card reader, mounted on the face of the right-hand frame post. It used to sit at
-        // local x=1.55, which put it at world x -4.66..-4.24 and straight THROUGH the wall
-        // whose edge is x=-4.5 (D-52).
-        var reader = EsTheme.Box("CardReader", d.transform, new Vector3(1.02f, 1.15f, 0.30f),
-                                 new Vector3(0.36f, 0.55f, 0.16f), _metal);
-        EsTheme.Box("ReaderSlot", reader.transform, new Vector3(0f, 0.06f, 0.10f),
-                    new Vector3(0.26f, 0.035f, 0.04f), _glowOn);
-        var socket = reader.AddComponent<ItemSocket>();
-        socket.acceptsKey = "cartao";
-        socket.acceptsLabel = "CARTAO DE LIBERACAO";
-        socket.indicator = reader.GetComponent<Renderer>();
-        socket.stowParent = d.transform;
-        socket.acceptClip = Clip("lock_insert");
-        socket.rejectClip = Clip("error_buzz");
+        // Seal plate where the card reader used to sit: the door now opens
+        // only on the optical key (D-190), so there is no slot anymore.
+        EsTheme.Box("SealPlate", d.transform, new Vector3(1.02f, 1.15f, 0.30f),
+                    new Vector3(0.36f, 0.55f, 0.06f), _metal);
 
         var bd = d.AddComponent<BlastDoor>();
-        bd.cardSocket = socket;
         bd.doorLeaf = hinge.transform;
         bd.statusLamp = lampGo.GetComponent<Renderer>();
         bd.servoClip = Clip("servo_door");
@@ -6267,7 +6477,7 @@ public static class EsSceneBuilder
             new Vector2(1024f, 740f), new Color32(0x14, 0x2A, 0x33, 0xFF));
         board.GetComponent<RectTransform>().localScale = Vector3.one * 0.0019f;   // ~1.95 x 1.41 m
 
-        var bTitle = EsUi.Label(board.transform, "T", "PLANTÃO 09", 68, new Color(0.55f, 0.92f, 0.80f),
+        var bTitle = EsUi.Label(board.transform, "T", "PROTOCOLO NO-ZERO", 68, new Color(0.55f, 0.92f, 0.80f),
                                 TextAnchor.UpperCenter, FontStyle.Bold);
         bTitle.rectTransform.anchorMin = new Vector2(0, 1); bTitle.rectTransform.anchorMax = new Vector2(1, 1);
         bTitle.rectTransform.offsetMin = new Vector2(20, -135); bTitle.rectTransform.offsetMax = new Vector2(-20, -25);
@@ -6280,10 +6490,9 @@ public static class EsSceneBuilder
         // verticalOverflow = Overflow on purpose, so a puzzle clue is never silently clipped,
         // which also means overflow is VISIBLE rather than harmless. See D-50.
         var bBody = EsUi.Label(board.transform, "B",
-            "TURNO 1    06:00 - 14:00\n     D. FERREIRA  ......  #47\n\n" +
-            "TURNO 2    14:00 - 22:00\n     A. NUNES  ......  #12\n\n" +
-            "TURNO 3    22:00 - 06:00\n     M. COSTA  ......  #86\n\n" +
-            "A credencial de sobrevivência é a do turno\nque estava ativo no instante da falha.",
+            "2142 - NO-ZERO\n     PESQUISA CRIPTOGRAFICA\n\n" +
+            "A.E.G.I.S. VIU UM FANTASMA\n     E SELOU TUDO ......... 60:00\n\n" +
+            "O REATOR SO REINICIA\nA MAO, EM 3 PASSOS:\nENERGIA, LOGS E CHAVE.",
             36, new Color(0.88f, 0.94f, 0.91f), TextAnchor.UpperLeft);
         bBody.rectTransform.anchorMin = Vector2.zero; bBody.rectTransform.anchorMax = Vector2.one;
         bBody.rectTransform.offsetMin = new Vector2(55, 30); bBody.rectTransform.offsetMax = new Vector2(-55, -150);
@@ -6294,18 +6503,16 @@ public static class EsSceneBuilder
             new Vector2(900f, 640f), new Color32(0x1A, 0x1C, 0x18, 0xFF));
         log.GetComponent<RectTransform>().localScale = Vector3.one * 0.0018f;   // ~1.62 x 1.15 m
 
-        var lTitle = EsUi.Label(log.transform, "T", "REGISTRO DE MANUTENÇÃO", 44,
+        var lTitle = EsUi.Label(log.transform, "T", "CADERNO DO TECNICO", 44,
                                 new Color(0.95f, 0.80f, 0.45f), TextAnchor.UpperCenter, FontStyle.Bold);
         lTitle.rectTransform.anchorMin = new Vector2(0, 1); lTitle.rectTransform.anchorMax = new Vector2(1, 1);
         lTitle.rectTransform.offsetMin = new Vector2(15, -100); lTitle.rectTransform.offsetMax = new Vector2(-15, -25);
 
         var lBody = EsUi.Label(log.transform, "B",
-            "FILIAL 09 - LAÇO DE EMERGÊNCIA\n\n" +
-            "FALHA DE ENERGIA ......... 02:47\n" +
-            "TURNO ATIVO ............. [ilegível]\n" +
-            "CÉLULA DE RESERVA ....... 1 (unidade)\n" +
-            "VENTILAÇÃO .............. ON\n" +
-            "TRAVAS ................. seladas",
+            "MALHA HEXAGONAL\n" +
+            "EMISSOR ATE O RECEPTOR\nSEM PORTA PARA O VAZIO\n\n" +
+            "LOGS: DO MENOR PARA\nO MAIOR. O ULTIMO\nDIGITO ABRE O COFRE\n\n" +
+            "PLACAS: GIRE ATE A\nLUZ DESENHAR O 4",
             40, new Color(0.88f, 0.86f, 0.78f), TextAnchor.UpperLeft);
         lBody.rectTransform.anchorMin = Vector2.zero; lBody.rectTransform.anchorMax = Vector2.one;
         lBody.rectTransform.offsetMin = new Vector2(45, 40); lBody.rectTransform.offsetMax = new Vector2(-45, -120);
@@ -6354,6 +6561,729 @@ public static class EsSceneBuilder
         rb.mass = 4f;
     }
 
+    /// <summary>Removes scene-root leftovers that no build owns: HUD copies from older
+    /// builds, DontDestroyOnLoad audio pools and items dragged out during play sessions
+    /// (this project runs with scene-reload disabled, so play-time mutations persist
+    /// into the saved scene). Root-only (parent == null): anything under the level root
+    /// is rebuilt anyway, and the user's own objects are never touched by name-match.</summary>
+    static void CleanStrayRootObjects()
+    {
+        var strays = new HashSet<string> {
+            "EsAimPrompt", "EsCrosshair", "EsSfxPool", "EsMusic",
+            "CelulaDeEnergia", "ChaveDeAcesso", "CartaoDeLiberacao"
+        };
+        int n = 0;
+        foreach (var go in SceneManager.GetActiveScene().GetRootGameObjects())
+        {
+            if (go == null || !strays.Contains(go.name)) continue;
+            string dead = go.name;
+            Object.DestroyImmediate(go);
+            n++;
+            Debug.Log("[EscapeRoom] stray root object removed: " + dead);
+        }
+        if (n > 0) Debug.Log("[EscapeRoom] " + n + " stray root object(s) cleaned.");
+    }
+
+    // =====================================================================
+    // dressing: Filial 9 ambience. A 24x24 bare floor reads as a warehouse, not a
+    // deactivated automated bank branch, so this pass furnishes it: queue rails to the
+    // terminal, a dead teller counter, waiting benches, dark ATMs, a server rack, ice
+    // pillars (the arctic signature), a carpet runner, ceiling light panels, hanging
+    // signs and facility smalls. Everything lives under Dressing (wiped per build).
+    //
+    // Keep-out volumes (never built into): the exit opening x[-7.5,-4.5] z[-13.5,-9.5],
+    // the terminal lane x[-2.5,0.5] z[-10,-7], the archive front x[9.3,11.3] z[0.8,3.2].
+    // Floor decals sit 0.015 proud with their UNDERSIDE sunk (top 0.025 / bottom -0.005):
+    // flush faces z-fight (D-114), and the kit floor itself runs two layers (D-116).
+    // =====================================================================
+    static void BuildDressing(Transform root)
+    {
+        var dress = new GameObject("Dressing");
+        dress.transform.SetParent(root, false);
+
+        // ---- queue rails toward the terminal (side runs only, both ends open: a cross
+        // ---- belt would fence the player out of the lane they must walk)
+        foreach (var px in new[] { -2.6f, 0.6f })
+            foreach (var pz in new[] { -7.5f, -5.5f })
+                QueuePost(dress.transform, new Vector3(px, 0f, pz));
+        EsTheme.Box("BeltW", dress.transform, new Vector3(-2.6f, 0.80f, -6.5f),
+                    new Vector3(0.06f, 0.12f, 2.0f), _belt);
+        EsTheme.Box("BeltE", dress.transform, new Vector3(0.6f, 0.80f, -6.5f),
+                    new Vector3(0.06f, 0.12f, 2.0f), _belt);
+
+        // ---- dead teller counter, west-centre, front facing east
+        var counter = new GameObject("TellerCounter");
+        counter.transform.SetParent(dress.transform, false);
+        counter.transform.position = new Vector3(-5.5f, 0f, 0.5f);
+        EsTheme.Box("Base", counter.transform, new Vector3(0f, 0.525f, 0f),
+                    new Vector3(4.0f, 1.05f, 0.6f), _shellDark);
+        EsTheme.Box("Top", counter.transform, new Vector3(0f, 1.08f, 0f),
+                    new Vector3(4.3f, 0.06f, 0.9f), _metal);
+        foreach (var fx in new[] { -1.5f, 0f, 1.5f })
+            EsTheme.Box("Fin" + fx, counter.transform, new Vector3(fx, 1.36f, 0f),
+                        new Vector3(0.06f, 0.50f, 0.7f), _shell);
+        foreach (var sx in new[] { -1.0f, 1.0f })
+        {
+            EsTheme.Box("ScreenPost" + sx, counter.transform, new Vector3(sx, 1.36f, -0.1f),
+                        new Vector3(0.08f, 0.50f, 0.08f), _metal);
+            EsTheme.Box("Screen" + sx, counter.transform, new Vector3(sx, 1.62f, -0.1f),
+                        new Vector3(0.52f, 0.36f, 0.05f), _screenOff);
+        }
+
+        // ---- waiting benches, south-centre, facing north
+        MakeBench(dress.transform, new Vector3(-3.0f, 0f, 6.0f));
+        MakeBench(dress.transform, new Vector3(2.5f, 0f, 6.0f));
+
+        // ---- dark ATMs, east wall, facing west (unpowered: the branch is deactivated)
+        MakeAtm(dress.transform, new Vector3(11.0f, 0f, 5.5f));
+        MakeAtm(dress.transform, new Vector3(11.0f, 0f, 7.0f));
+
+        // ---- server rack, east wall north of the archive, facing west
+        var rack = new GameObject("ServerRack");
+        rack.transform.SetParent(dress.transform, false);
+        rack.transform.position = new Vector3(11.0f, 0f, -3.5f);
+        EsTheme.Box("Cabinet", rack.transform, new Vector3(0f, 1.0f, 0f),
+                    new Vector3(0.8f, 2.0f, 0.9f), _shellDark);
+        foreach (var ly in new[] { 0.8f, 1.2f, 1.6f })
+            EsTheme.Box("Led" + ly, rack.transform, new Vector3(-0.41f, ly, 0f),
+                        new Vector3(0.02f, 0.03f, 0.7f), _panelGlow);
+        EsTheme.Box("Vent", rack.transform, new Vector3(0f, 2.03f, 0f),
+                    new Vector3(0.7f, 0.06f, 0.8f), _metal);
+
+        // ---- ice pillars, the arctic signature, near the four corners
+        foreach (var cp in new[] {
+            new Vector3(-10.3f, 0f, -10.2f), new Vector3(10.3f, 0f, -10.2f),
+            new Vector3(-10.3f, 0f, 10.3f), new Vector3(10.3f, 0f, 10.3f) })
+            MakeFrostPillar(dress.transform, cp);
+
+        // ---- carpet runner: south door to the queue entry + mats (no colliders:
+        // ---- floor decals must never answer a physics ray)
+        FlatCarpet(dress.transform, "Runner1", new Vector3(-0.25f, 0.01f, 7.5f),
+                   new Vector3(1.8f, 0.03f, 5.0f));
+        FlatCarpet(dress.transform, "Runner2", new Vector3(-1.0f, 0.01f, 0f),
+                   new Vector3(1.8f, 0.03f, 10.0f));
+        FlatCarpet(dress.transform, "ArchiveMat", new Vector3(10.3f, 0.01f, 2.8f),
+                   new Vector3(1.6f, 0.03f, 1.6f));
+        FlatCarpet(dress.transform, "BenchMat", new Vector3(8.2f, 0.01f, -8.6f),
+                   new Vector3(2.8f, 0.03f, 1.4f));
+
+        // ---- ceiling light panels over the centre (fake glow: the real light is RoomLight)
+        foreach (var px in new[] { -3.0f, 1.0f })
+            foreach (var pz in new[] { -4.0f, 0.0f, 4.0f })
+                MakeCeilingPanel(dress.transform, new Vector3(px, 3.32f, pz));
+
+        // ---- hanging queue sign, readable from both sides (D-33 on each face).
+        // Board centre 2.62: its bottom (2.37) clears the 2.03 m player capsule (D-178).
+        MakeHangingSign(dress.transform, new Vector3(-1.0f, 2.62f, -5.5f), "ATENDIMENTO");
+        // ---- branch sign on the south wall, facing into the room
+        var bs = EsUi.WorldCanvas(dress.transform, "BranchSign", new Vector3(2.0f, 2.4f, 11.74f),
+                                  new Vector3(0f, 0f, 0f), new Vector2(640f, 280f),
+                                  new Color32(0x14, 0x2A, 0x22, 0xFF));
+        bs.GetComponent<RectTransform>().localScale = Vector3.one * 0.0016f;
+        // plaque geometry (top-strip title + shortened body): a full-rect MiddleCenter
+        // title's glyph box reaches the body text and trips the overlap check.
+        var bs1 = EsUi.Label(bs.transform, "T", "NO-ZERO", 64,
+                             new Color(0.55f, 0.92f, 0.80f), TextAnchor.UpperCenter, FontStyle.Bold);
+        bs1.rectTransform.anchorMin = new Vector2(0, 1); bs1.rectTransform.anchorMax = new Vector2(1, 1);
+        bs1.rectTransform.offsetMin = new Vector2(15, -95); bs1.rectTransform.offsetMax = new Vector2(-15, -12);
+        var bs2 = EsUi.Label(bs.transform, "B", "PESQUISA CRIPTOGRAFICA", 34,
+                             new Color(0.88f, 0.94f, 0.91f), TextAnchor.UpperCenter);
+        bs2.rectTransform.anchorMin = Vector2.zero; bs2.rectTransform.anchorMax = Vector2.one;
+        bs2.rectTransform.offsetMin = new Vector2(15, 12); bs2.rectTransform.offsetMax = new Vector2(-15, -140);
+
+        // ---- facility smalls: fire cabinet by the exit, bins by the benches
+        EsTheme.Box("FireCabinet", dress.transform, new Vector3(-3.6f, 1.1f, -11.3f),
+                    new Vector3(0.7f, 1.4f, 0.4f), _cabRed);
+        EsTheme.Box("FireStripe", dress.transform, new Vector3(-3.6f, 1.35f, -11.09f),
+                    new Vector3(0.5f, 0.18f, 0.02f), _paper);
+        MakeBin(dress.transform, new Vector3(-4.6f, 0f, 4.6f));
+        MakeBin(dress.transform, new Vector3(4.1f, 0f, 4.6f));
+
+        Debug.Log("[EscapeRoom] Dressing built: queue, counter, benches, ATMs, rack, "
+                  + "ice, runner, panels, signs, smalls");
+    }
+
+    static void QueuePost(Transform parent, Vector3 pos)
+    {
+        var p = new GameObject("QueuePost");
+        p.transform.SetParent(parent, false);
+        p.transform.position = pos;
+        Cyl(p.transform, "Base", new Vector3(0f, 0.02f, 0f), 0.16f, 0.04f, _metal);
+        Cyl(p.transform, "Pole", new Vector3(0f, 0.50f, 0f), 0.035f, 0.95f, _metal);
+        var knob = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        knob.name = "Knob";
+        knob.transform.SetParent(p.transform, false);
+        knob.transform.localPosition = new Vector3(0f, 1.0f, 0f);
+        knob.transform.localScale = Vector3.one * 0.11f;
+        knob.GetComponent<Renderer>().sharedMaterial = _metal;
+    }
+
+    static void Cyl(Transform parent, string name, Vector3 localPos, float r, float h, Material mat)
+    {
+        var go = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        go.name = name;
+        go.transform.SetParent(parent, false);
+        go.transform.localPosition = localPos;
+        go.transform.localScale = new Vector3(r * 2f, h / 2f, r * 2f);
+        go.GetComponent<Renderer>().sharedMaterial = mat;
+    }
+
+    static void MakeBench(Transform parent, Vector3 pos)
+    {
+        var b = new GameObject("Bench");
+        b.transform.SetParent(parent, false);
+        b.transform.position = pos;
+        EsTheme.Box("Seat", b.transform, new Vector3(0f, 0.45f, 0f),
+                    new Vector3(1.8f, 0.09f, 0.5f), _shell);
+        foreach (var lx in new[] { -0.75f, 0.75f })
+            EsTheme.Box("Leg" + lx, b.transform, new Vector3(lx, 0.225f, 0f),
+                        new Vector3(0.09f, 0.45f, 0.45f), _shellDark);
+        EsTheme.Box("Back", b.transform, new Vector3(0f, 0.80f, 0.27f),
+                    new Vector3(1.8f, 0.50f, 0.09f), _shell);
+    }
+
+    static void MakeAtm(Transform parent, Vector3 pos)
+    {
+        var a = new GameObject("DeadAtm");
+        a.transform.SetParent(parent, false);
+        a.transform.position = pos;
+        EsTheme.Box("Body", a.transform, new Vector3(0f, 0.90f, 0f),
+                    new Vector3(0.7f, 1.8f, 0.65f), _shellDark);
+        EsTheme.Box("Plinth", a.transform, new Vector3(0f, 0.06f, 0f),
+                    new Vector3(0.8f, 0.12f, 0.75f), _metal);
+        EsTheme.Box("Screen", a.transform, new Vector3(-0.33f, 1.40f, 0f),
+                    new Vector3(0.05f, 0.50f, 0.40f), _screenOff);
+        EsTheme.Box("Slot", a.transform, new Vector3(-0.33f, 1.05f, 0f),
+                    new Vector3(0.05f, 0.06f, 0.30f), _metal);
+        EsTheme.Box("Top", a.transform, new Vector3(0f, 1.83f, 0f),
+                    new Vector3(0.74f, 0.06f, 0.69f), _metal);
+    }
+
+    static void MakeFrostPillar(Transform parent, Vector3 pos)
+    {
+        var f = new GameObject("FrostPillar");
+        f.transform.SetParent(parent, false);
+        f.transform.position = pos;
+        EsTheme.Box("Base", f.transform, new Vector3(0f, 0.06f, 0f),
+                    new Vector3(0.70f, 0.12f, 0.70f), _metal);
+        EsTheme.Box("Ice", f.transform, new Vector3(0f, 1.42f, 0f),
+                    new Vector3(0.55f, 2.60f, 0.55f), _frost);
+        EsTheme.Box("Cap", f.transform, new Vector3(0f, 2.76f, 0f),
+                    new Vector3(0.62f, 0.08f, 0.62f), _metal);
+    }
+
+    static void FlatCarpet(Transform parent, string name, Vector3 pos, Vector3 size)
+    {
+        var go = EsTheme.Box(name, parent, Vector3.zero, size, _carpet);
+        go.transform.position = pos;
+        Object.DestroyImmediate(go.GetComponent<Collider>());
+    }
+
+    static void MakeCeilingPanel(Transform parent, Vector3 pos)
+    {
+        var p = new GameObject("CeilPanel");
+        p.transform.SetParent(parent, false);
+        p.transform.position = pos;
+        EsTheme.Box("Glow", p.transform, Vector3.zero,
+                    new Vector3(1.4f, 0.06f, 0.8f), _panelGlow);
+        foreach (var rx in new[] { -0.5f, 0.5f })
+            EsTheme.Box("Rod" + rx, p.transform, new Vector3(rx, 0.20f, 0f),
+                        new Vector3(0.04f, 0.35f, 0.04f), _metal);
+    }
+
+    static void MakeHangingSign(Transform parent, Vector3 pos, string text)
+    {
+        var s = new GameObject("HangSign");
+        s.transform.SetParent(parent, false);
+        s.transform.position = pos;
+        EsTheme.Box("Board", s.transform, Vector3.zero,
+                    new Vector3(1.6f, 0.5f, 0.08f), _shellDark);
+        // Rods run from the board top (2.87) to just under the 3.70 ceiling.
+        foreach (var rx in new[] { -0.6f, 0.6f })
+            EsTheme.Box("Rod" + rx, s.transform, new Vector3(rx, 0.69f, 0f),
+                        new Vector3(0.04f, 0.88f, 0.04f), _metal);
+        foreach (var side in new[] { 1f, -1f })
+        {
+            var cv = EsUi.WorldCanvas(s.transform, "Face" + (side > 0 ? "S" : "N"),
+                                      new Vector3(0f, 0f, side * 0.045f),
+                                      new Vector3(0f, side > 0 ? 180f : 0f, 0f),
+                                      new Vector2(640f, 200f),
+                                      new Color32(0x14, 0x2A, 0x22, 0xFF));
+            cv.GetComponent<RectTransform>().localScale = Vector3.one * 0.0016f;
+            SignTitle(cv.transform, text, 64);
+        }
+    }
+
+    static void SignTitle(Transform parent, string text, int size)
+    {
+        var t = EsUi.Label(parent, "T", text, size, new Color(0.55f, 0.92f, 0.80f),
+                           TextAnchor.MiddleCenter, FontStyle.Bold);
+        t.rectTransform.anchorMin = Vector2.zero; t.rectTransform.anchorMax = Vector2.one;
+        t.rectTransform.offsetMin = new Vector2(15, 12); t.rectTransform.offsetMax = new Vector2(-15, -12);
+    }
+
+    static void MakeBin(Transform parent, Vector3 pos)
+    {
+        var b = new GameObject("Bin");
+        b.transform.SetParent(parent, false);
+        b.transform.position = pos;
+        Cyl(b.transform, "Can", new Vector3(0f, 0.28f, 0f), 0.22f, 0.55f, _shellDark);
+        Cyl(b.transform, "Rim", new Vector3(0f, 0.56f, 0f), 0.24f, 0.05f, _metal);
+    }
+
+    // =====================================================================
+    // A.E.G.I.S. Fase 0: denied-access holograms + exposed fibre-optic runs.
+    // Holograms are their own World Canvases (no cross-canvas overlap), carry
+    // no colliders and no click handlers, and blink alpha-only (EsHologramFlicker)
+    // so they can never eat a crosshair click or trip the overlap checks.
+    // Fibre runs sit 5 cm proud of the north inner face (-11.35), above head
+    // height; the drop hides behind the terminal body below y ~2.0.
+    // =====================================================================
+    static void BuildAegisDressing(Transform root)
+    {
+        var g = new GameObject("Aegis");
+        g.transform.SetParent(root, false);
+
+        Hologram(g.transform, "HoloTerminal", new Vector3(-1.0f, 2.55f, -10.0f), 0f);
+        Hologram(g.transform, "HoloExit", new Vector3(-3.6f, 2.35f, -11.05f), 2.1f);
+
+        foreach (var fy in new[] { 2.50f, 2.60f, 2.70f })
+            EsTheme.Box("Fiber" + fy, g.transform, new Vector3(0f, fy, -11.30f),
+                        new Vector3(20f, 0.03f, 0.03f), _fiber);
+        EsTheme.Box("FiberDrop", g.transform, new Vector3(-2.0f, 1.6f, -11.30f),
+                    new Vector3(0.03f, 1.9f, 0.03f), _fiber);
+
+        Debug.Log("[EscapeRoom] A.E.G.I.S. dressing built: 2 holograms + fibre runs");
+    }
+
+    static void Hologram(Transform parent, string name, Vector3 pos, float phase)
+    {
+        var cv = EsUi.WorldCanvas(parent, name, pos, new Vector3(0f, 180f, 0f),
+                                  new Vector2(640f, 200f),
+                                  new Color(0.10f, 0.02f, 0.02f, 0.72f));
+        cv.GetComponent<RectTransform>().localScale = Vector3.one * 0.004f;   // 2.56 x 0.80 m
+        var t = EsUi.Label(cv.transform, "Msg", "ACESSO NEGADO", 64,
+                           new Color(1f, 0.25f, 0.22f),
+                           TextAnchor.MiddleCenter, FontStyle.Bold);
+        t.rectTransform.anchorMin = Vector2.zero; t.rectTransform.anchorMax = Vector2.one;
+        t.rectTransform.offsetMin = new Vector2(15, 12); t.rectTransform.offsetMax = new Vector2(-15, -12);
+        var fl = t.gameObject.AddComponent<EsHologramFlicker>();
+        fl.speed = 3.1f;
+        fl.phase = phase;
+    }
+
+    // =====================================================================
+    // Puzzle 1 (Fase 1): hex plasma-routing panel on the north wall.
+    // Identity rotation (3D boxes need no yaw); only the status canvas takes
+    // yaw 180 per D-33. Grid centred on x=2.9: clear of the locker (east edge
+    // 1.7), the x=4.5 partition (west face 4.3) and the terminal lane.
+    // Clicks arrive as 3D IInteractable via the existing crosshair ray.
+    // =====================================================================
+    static EsHexGrid BuildHexPanel(Transform root, EscapeGameManager gm)
+    {
+        var panel = new GameObject("HexPanel");
+        panel.transform.SetParent(root, false);
+
+        var grid = panel.AddComponent<EsHexGrid>();
+        grid.cols = 4;
+        grid.rows = 4;
+        grid.cellSize = 0.27f;
+        grid.seed = 2142;
+        grid.baseMat = _hexBase;
+        grid.dimMat = _hexDim;
+        grid.liveMat = _hexLive;
+        grid.srcMat = _hexSrc;
+        grid.liveTileMat = _hexLiveTile;
+        grid.leafMat = _hexLeaf;
+        grid.leafLiveMat = _hexLeafLive;
+        grid.rotateClip = Clip("lock_insert");
+        grid.solvedClip = Clip("unlock_chime");
+        grid.gm = gm;
+        grid.Generate();
+
+        float w = grid.boundsLocal.x, h = grid.boundsLocal.y;
+        panel.transform.position = new Vector3(2.9f - w * 0.5f, 0.62f, -11.28f);
+
+        EsTheme.Box("HexBoard", panel.transform, new Vector3(w * 0.5f, h * 0.5f, -0.065f),
+                    new Vector3(w + 0.36f, h + 0.52f, 0.09f), _shellDark);
+
+        var st = EsUi.WorldCanvas(panel.transform, "HexStatus", new Vector3(w * 0.5f, h + 0.42f, 0.02f),
+                                  new Vector3(0f, 180f, 0f), new Vector2(640f, 200f),
+                                  new Color32(0x14, 0x1A, 0x1A, 0xFF));
+        st.GetComponent<RectTransform>().localScale = Vector3.one * 0.0016f;
+        var t1 = EsUi.Label(st.transform, "T", "MALHA DE ENERGIA", 56,
+                            new Color(0.55f, 0.92f, 0.80f), TextAnchor.UpperCenter, FontStyle.Bold);
+        t1.rectTransform.anchorMin = new Vector2(0, 1); t1.rectTransform.anchorMax = new Vector2(1, 1);
+        t1.rectTransform.offsetMin = new Vector2(15, -95); t1.rectTransform.offsetMax = new Vector2(-15, -12);
+        var t2 = EsUi.Label(st.transform, "B", "MALHA INSTAVEL - GIRE OS NOS", 34,
+                            new Color(0.88f, 0.94f, 0.91f), TextAnchor.UpperCenter);
+        t2.rectTransform.anchorMin = Vector2.zero; t2.rectTransform.anchorMax = Vector2.one;
+        t2.rectTransform.offsetMin = new Vector2(15, 12); t2.rectTransform.offsetMax = new Vector2(-15, -100);
+        grid.statusLabel = t2;
+        grid.RefreshAll();
+
+        Debug.Log("[EscapeRoom] Hex panel built: " + grid.nodes.Count + " nodes, "
+                  + PathDbg(grid) + " (seed 2142)");
+        return grid;
+    }
+
+    static void WireTerminalObjectives(TerminalController tc)
+    {
+        // The hint line names the current objective; the puzzles own their
+        // state, the terminal only reads it. Wired here (not in BuildTerminal)
+        // because the stations are built after the terminal.
+        if (tc == null) return;
+        tc.hex = Object.FindFirstObjectByType<EsHexGrid>();
+        tc.logPuzzle = Object.FindFirstObjectByType<EsLogSortPuzzle>();
+        tc.safePad = Object.FindFirstObjectByType<EsSafeKeypad>();
+        tc.plateReader = Object.FindFirstObjectByType<EsPlateReader>();
+        Debug.Log("[EscapeRoom] Terminal objectives wired: hex/logs/safe/reader");
+    }
+
+    static string PathDbg(EsHexGrid grid)
+    {
+        int path = 0, fixed_ = 0;
+        foreach (var n in grid.nodes) { if (n.isPath) path++; if (n.isFixed) fixed_++; }
+        return path + " on-path, " + fixed_ + " fixed, " + grid.capsPlaced + " caps";
+    }
+
+    // =====================================================================
+    // Puzzle 2 (Fase 2): log-decrypt console + safe with its own PIN keypad.
+    // WEST wall at (-11.3, z=5.0), root yawed +90 so its face looks +X into
+    // the room (rigid transform: child canvases keep local yaw 180, composing
+    // to world -90, the west-wall rule). North wall already holds hex,
+    // terminal and door; stacking a fourth station there made every puzzle a
+    // queue on one wall. Flow now walks the room: hex (north) -> logs/safe
+    // (west) -> plates across to the reader (south-east) -> door (north).
+    // Click-click (block, then slot): with a locked cursor the click resolves
+    // at the screen centre, so a real drag cannot be aimed. The safe keypad is decoupled from
+    // TerminalController: its own EsSafeKeypad, PIN 3719 (last chars of the
+    // chronologically ordered packets). The three acrylic plates live in the
+    // safe cavity, unreachable until the door swings (same guarantee as the
+    // locker, D-32).
+    // =====================================================================
+    static void BuildLogStation(Transform root, EsHexGrid grid)
+    {
+        var st = new GameObject("LogStation");
+        st.transform.SetParent(root, false);
+        st.transform.position = new Vector3(-11.30f, 0f, 5.0f);
+        st.transform.localEulerAngles = new Vector3(0f, 90f, 0f);
+
+        // safe cavity: back / sides / top / floor, open front (+z, the room)
+        EsTheme.Box("SafeBack", st.transform, new Vector3(0f, 0.55f, -0.25f), new Vector3(1.6f, 1.1f, 0.06f), _shell);
+        EsTheme.Box("SafeLeft", st.transform, new Vector3(-0.8f, 0.55f, 0f), new Vector3(0.06f, 1.1f, 0.5f), _shell);
+        EsTheme.Box("SafeRight", st.transform, new Vector3(0.8f, 0.55f, 0f), new Vector3(0.06f, 1.1f, 0.5f), _shell);
+        EsTheme.Box("SafeTop", st.transform, new Vector3(0f, 1.1f, 0f), new Vector3(1.6f, 0.06f, 0.5f), _shell);
+        EsTheme.Box("SafeFloor", st.transform, new Vector3(0f, 0.03f, 0f), new Vector3(1.6f, 0.06f, 0.5f), _metal);
+        var hinge = new GameObject("SafeDoorPivot");
+        hinge.transform.SetParent(st.transform, false);
+        hinge.transform.localPosition = new Vector3(-0.8f, 0f, 0.25f);
+        EsTheme.Box("SafeDoor", hinge.transform, new Vector3(0.8f, 0.55f, 0f), new Vector3(1.6f, 1.1f, 0.06f), _metal);
+
+        // upper pillar carrying both canvases
+        EsTheme.Box("Pillar", st.transform, new Vector3(0f, 1.75f, -0.19f), new Vector3(2.0f, 1.5f, 0.1f), _shell);
+
+        // ---- log canvas (1500x800 @ 0.0009 -> 1.35 x 0.72 m)
+        var logGo = new GameObject("LogCanvas", typeof(RectTransform));
+        logGo.transform.SetParent(st.transform, false);
+        logGo.transform.localPosition = new Vector3(0f, 2.0f, -0.135f);
+        logGo.transform.localEulerAngles = new Vector3(0f, 180f, 0f);
+        var logCv = logGo.AddComponent<Canvas>();
+        logCv.renderMode = RenderMode.WorldSpace;
+        var logRt = (RectTransform)logGo.transform;
+        logRt.sizeDelta = new Vector2(1500f, 800f);
+        logRt.localScale = Vector3.one * 0.0009f;
+        logGo.AddComponent<CanvasScaler>();
+        logGo.AddComponent<GraphicRaycaster>();
+        var logBg = EsUi.Img(logGo.transform, "Bg", EsTheme.ScreenBg);
+        EsUi.Stretch(logBg.rectTransform);
+        if (logGo.GetComponent<EsPuzzleInput>() == null)
+        {
+            var mark = logGo.AddComponent<EsPuzzleInput>();
+            mark.what = "log packet ordering";
+        }
+
+        var lt = EsUi.Label(logGo.transform, "T", "REGISTRO DE ACESSO - A.E.G.I.S.", 46,
+                            EsTheme.ScreenOn, TextAnchor.UpperCenter, FontStyle.Bold);
+        lt.rectTransform.anchorMin = new Vector2(0, 1); lt.rectTransform.anchorMax = new Vector2(1, 1);
+        lt.rectTransform.offsetMin = new Vector2(0, -90); lt.rectTransform.offsetMax = new Vector2(0, -12);
+
+        var puzzle = st.AddComponent<EsLogSortPuzzle>();
+        puzzle.grid = grid;
+        puzzle.selectClip = Clip("ui_click");
+        puzzle.placeClip = Clip("lock_insert");
+        puzzle.solvedClip = Clip("unlock_chime");
+        puzzle.errorClip = Clip("error_buzz");
+
+        const float bw = 330f, bh = 110f, gap = 20f, x0 = 60f;
+        for (int i = 0; i < 4; i++)
+        {
+            var b = EsUi.ButtonWithLabel(logGo.transform, "Block_" + i, "0x000000", 40,
+                                         new Color(0.07f, 0.22f, 0.19f, 1f), EsTheme.ScreenOn);
+            var brt = (RectTransform)b.transform;
+            brt.anchorMin = brt.anchorMax = new Vector2(0, 1);
+            brt.pivot = new Vector2(0, 1);
+            brt.sizeDelta = new Vector2(bw, bh);
+            brt.anchoredPosition = new Vector2(x0 + i * (bw + gap), -130f);
+            AddHitTarget(brt, 0.015f, "_Block" + i);
+            if (b.GetComponent<EsHoverHighlight>() == null) b.gameObject.AddComponent<EsHoverHighlight>();
+            puzzle.blockButtons[i] = b;
+            puzzle.blockLabels[i] = b.GetComponentInChildren<Text>();
+
+            var s = EsUi.ButtonWithLabel(logGo.transform, "Slot_" + i, "----", 40,
+                                         new Color(0.10f, 0.13f, 0.18f, 1f), EsTheme.Amber);
+            var srt = (RectTransform)s.transform;
+            srt.anchorMin = srt.anchorMax = new Vector2(0, 1);
+            srt.pivot = new Vector2(0, 1);
+            srt.sizeDelta = new Vector2(bw, bh);
+            srt.anchoredPosition = new Vector2(x0 + i * (bw + gap), -280f);
+            AddHitTarget(srt, 0.015f, "_Slot" + i);
+            if (s.GetComponent<EsHoverHighlight>() == null) s.gameObject.AddComponent<EsHoverHighlight>();
+            puzzle.slotButtons[i] = s;
+            puzzle.slotLabels[i] = s.GetComponentInChildren<Text>();
+        }
+        var lst = EsUi.Label(logGo.transform, "LogStatus", "ORDENE OS PACOTES DO MENOR PARA O MAIOR", 38,
+                             EsTheme.Amber, TextAnchor.MiddleCenter, FontStyle.Bold);
+        lst.rectTransform.anchorMin = new Vector2(0, 1); lst.rectTransform.anchorMax = new Vector2(1, 1);
+        lst.rectTransform.offsetMin = new Vector2(20, -520); lst.rectTransform.offsetMax = new Vector2(-20, -420);
+        puzzle.statusLabel = lst;
+        puzzle.Refresh();
+
+        // ---- safe keypad canvas (1000x760 @ 0.0009 -> 0.90 x 0.68 m)
+        var padGo = new GameObject("SafePad", typeof(RectTransform));
+        padGo.transform.SetParent(st.transform, false);
+        padGo.transform.localPosition = new Vector3(0f, 1.22f, -0.135f);
+        padGo.transform.localEulerAngles = new Vector3(0f, 180f, 0f);
+        var padCv = padGo.AddComponent<Canvas>();
+        padCv.renderMode = RenderMode.WorldSpace;
+        var padRt = (RectTransform)padGo.transform;
+        padRt.sizeDelta = new Vector2(1000f, 760f);
+        padRt.localScale = Vector3.one * 0.0009f;
+        padGo.AddComponent<CanvasScaler>();
+        padGo.AddComponent<GraphicRaycaster>();
+        var padBg = EsUi.Img(padGo.transform, "Bg", EsTheme.ScreenBg);
+        EsUi.Stretch(padBg.rectTransform);
+
+        var keys = new GameObject("SafeKeys", typeof(RectTransform));
+        keys.transform.SetParent(padGo.transform, false);
+        var krt = (RectTransform)keys.transform;
+        krt.anchorMin = Vector2.zero; krt.anchorMax = Vector2.one;
+        krt.offsetMin = Vector2.zero; krt.offsetMax = Vector2.zero;
+        if (keys.GetComponent<EsPuzzleInput>() == null)
+        {
+            var mark = keys.AddComponent<EsPuzzleInput>();
+            mark.what = "safe PIN entry";
+        }
+        var echo = EsUi.Label(keys.transform, "SafeEcho", "____", 64, EsTheme.Amber,
+                              TextAnchor.MiddleCenter, FontStyle.Bold);
+        echo.rectTransform.anchorMin = new Vector2(0, 1); echo.rectTransform.anchorMax = new Vector2(1, 1);
+        echo.rectTransform.offsetMin = new Vector2(0, -100); echo.rectTransform.offsetMax = new Vector2(0, -10);
+
+        string[] caps = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "DEL", "ENTER" };
+        const float cw = 280f, ch = 100f, kgap = 12f, kx0 = 68f, ky0 = 120f;
+        for (int i = 0; i < caps.Length; i++)
+        {
+            int cx = i % 3, cy = i / 3;
+            string cap = caps[i];
+            bool special = cap == "ENTER" || cap == "DEL";
+            Color plate = cap == "ENTER" ? new Color(0.20f, 0.46f, 0.16f, 1f)
+                        : cap == "DEL" ? new Color(0.46f, 0.11f, 0.09f, 1f)
+                        : new Color(0.07f, 0.22f, 0.19f, 1f);
+            Color fg = cap == "DEL" ? EsTheme.Warn : cap == "ENTER" ? EsTheme.Amber : EsTheme.ScreenOn;
+            var b = EsUi.ButtonWithLabel(keys.transform, "SKey_" + cap, cap, special ? 30 : 44, plate, fg);
+            var brt = (RectTransform)b.transform;
+            brt.anchorMin = brt.anchorMax = new Vector2(0, 1);
+            brt.pivot = new Vector2(0, 1);
+            brt.sizeDelta = new Vector2(cw, ch);
+            brt.anchoredPosition = new Vector2(kx0 + cx * (cw + kgap), -ky0 - cy * (ch + kgap));
+            AddHitTarget(brt, 0.015f, "_SKey");
+            if (b.GetComponent<EsHoverHighlight>() == null) b.gameObject.AddComponent<EsHoverHighlight>();
+        }
+        // Total reset: a mistyped PIN restarts clean with one deliberate click
+        // instead of four DELs. Sits below the grid, above the status line.
+        var clr = EsUi.ButtonWithLabel(keys.transform, "SKey_LIMPAR", "LIMPAR", 30,
+                                       new Color(0.46f, 0.11f, 0.09f, 1f), EsTheme.Warn);
+        var clrt = (RectTransform)clr.transform;
+        clrt.anchorMin = clrt.anchorMax = new Vector2(0, 1);
+        clrt.pivot = new Vector2(0, 1);
+        clrt.sizeDelta = new Vector2(864f, 80f);
+        clrt.anchoredPosition = new Vector2(68f, -570f);
+        AddHitTarget(clrt, 0.015f, "_SKey");
+        if (clr.GetComponent<EsHoverHighlight>() == null) clr.gameObject.AddComponent<EsHoverHighlight>();
+
+        var sst = EsUi.Label(keys.transform, "SafeStatus", "PIN 4 DIGITOS - DEL APAGA - LIMPAR ZERA", 30,
+                             EsTheme.Amber, TextAnchor.MiddleCenter, FontStyle.Bold);
+        sst.rectTransform.anchorMin = new Vector2(0, 1); sst.rectTransform.anchorMax = new Vector2(1, 1);
+        sst.rectTransform.offsetMin = new Vector2(10, -744); sst.rectTransform.offsetMax = new Vector2(-10, -664);
+
+        var pad = st.AddComponent<EsSafeKeypad>();
+        pad.correctPin = "3719";
+        pad.keypadRoot = keys;
+        pad.echo = echo;
+        pad.statusLabel = sst;
+        pad.safeDoorPivot = hinge.transform;
+        pad.clickClip = Clip("ui_click");
+        pad.errorClip = Clip("error_buzz");
+        pad.unlockClip = Clip("unlock_chime");
+        pad.DebugReset();
+
+        // ---- the three plates, standing in the safe cavity
+        int[][] bases = new int[][]
+        {
+            new int[] { 0,1,0,0, 0,1,0,0, 0,0,0,0, 1,1,1,0 },
+            new int[] { 1,0,0,0, 0,0,0,0, 0,0,1,1, 0,0,0,0 },
+            new int[] { 0,0,1,0, 0,0,0,0, 0,0,1,0, 0,1,0,0 },
+        };
+        float[] px = new float[] { -0.45f, 0f, 0.45f };
+        for (int i = 0; i < 3; i++)
+        {
+            var visual = PlateModel(st.transform, new Vector3(px[i], 0.62f, -0.05f), bases[i]);
+            var item = FinishItem(visual, st.transform, "PlacaAcrilico" + (i + 1),
+                                  new Vector3(px[i], 0.62f, -0.05f),
+                                  "placa", "Placa de Acrilico " + (i + 1), 0.3f);
+            var plate = visual.AddComponent<EsAcrylicPlate>();
+            plate.plateId = i;
+            plate.baseCells = bases[i];
+            plate.rotation = 0;
+            plate.cellsRoot = visual.transform.Find("Cells");
+            plate.ApplyVisual();
+        }
+
+        Debug.Log("[EscapeRoom] Log station built: sort panel + safe PIN + 3 plates");
+    }
+
+    /// <summary>Acrylic plate visual: translucent sheet + opaque cells where the
+    /// base matrix holds 1. Cells ride a "Cells" pivot so rotation turns the
+    /// whole pattern rigidly, matching Rotated() by construction.</summary>
+    static GameObject PlateModel(Transform parent, Vector3 pos, int[] baseCells)
+    {
+        var root = new GameObject("PlacaVisual");
+        root.transform.SetParent(parent, false);
+        root.transform.localPosition = pos;
+        EsTheme.Box("Sheet", root.transform, Vector3.zero, new Vector3(0.32f, 0.32f, 0.012f), _frost);
+        var cells = new GameObject("Cells");
+        cells.transform.SetParent(root.transform, false);
+        cells.transform.localPosition = Vector3.zero;
+        const float pitch = 0.07f;
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < 4; c++)
+            {
+                if (baseCells[r * 4 + c] == 0) continue;
+                EsTheme.Box("Cell_" + r + "_" + c, cells.transform,
+                    new Vector3((c - 1.5f) * pitch, (1.5f - r) * pitch, 0f),
+                    new Vector3(0.06f, 0.06f, 0.016f), _shellDark);
+            }
+        return root;
+    }
+
+    // =====================================================================
+    // Puzzle 3 (Fase 3): optical reader on the east wall SOUTH end (z=8.5),
+    // by the ATMs and crates hardware corner - clear of the dead archive
+    // (z 0.8..3.2) and the server rack (z -3.95..-3.05). North wall already
+    // holds hex, terminal and door, west holds the log station: the three
+    // puzzles now live on three walls and the run crosses the whole room.
+    // Three sockets take any plate (all share itemKey "placa" - OR is
+    // only rotations validate). The canvas previews the live OR and carries
+    // one GIRAR button per slot; on the digit-4 template the reader latches
+    // and the blast door force-opens.
+    // =====================================================================
+    static void BuildPlateReaderStation(Transform root, BlastDoor door, EscapeGameManager gm)
+    {
+        var rd = new GameObject("PlateReader");
+        rd.transform.SetParent(root, false);
+        rd.transform.position = new Vector3(11.30f, 0f, 8.5f);
+
+        EsTheme.Box("ReaderBack", rd.transform, new Vector3(0.2f, 1.2f, 0f), new Vector3(0.1f, 2.0f, 2.2f), _shell);
+        EsTheme.Box("ReaderTray", rd.transform, new Vector3(-0.1f, 0.82f, 0f), new Vector3(0.5f, 0.06f, 2.0f), _metal);
+
+        var reader = rd.AddComponent<EsPlateReader>();
+        reader.door = door;
+        reader.gm = gm;
+        reader.rotateClip = Clip("ui_click");
+        reader.approveClip = Clip("success_stinger");
+        reader.seatClip = Clip("lock_insert");
+
+        float[] pz = new float[] { -0.6f, 0f, 0.6f };
+        for (int i = 0; i < 3; i++)
+        {
+            var s = MakeSocket(rd.transform, "PlateSlot" + i, new Vector3(-0.05f, 1.15f, pz[i]),
+                               "placa", "PLACA DE ACRILICO", _metal);
+            s.transform.localEulerAngles = new Vector3(0f, 90f, 0f);
+            s.acceptClip = Clip("lock_insert");
+            s.rejectClip = Clip("error_buzz");
+            reader.sockets[i] = s;
+        }
+
+        // canvas 1100x900 @ 0.0011 -> 1.21 x 0.99 m, east-wall yaw +90 (D-33)
+        var cvGo = new GameObject("ReaderCanvas", typeof(RectTransform));
+        cvGo.transform.SetParent(rd.transform, false);
+        cvGo.transform.localPosition = new Vector3(0.1f, 2.05f, 0f);
+        cvGo.transform.localEulerAngles = new Vector3(0f, 90f, 0f);
+        var cv = cvGo.AddComponent<Canvas>();
+        cv.renderMode = RenderMode.WorldSpace;
+        var crt = (RectTransform)cvGo.transform;
+        crt.sizeDelta = new Vector2(1100f, 900f);
+        crt.localScale = Vector3.one * 0.0011f;
+        cvGo.AddComponent<CanvasScaler>();
+        cvGo.AddComponent<GraphicRaycaster>();
+        var bg = EsUi.Img(cvGo.transform, "Bg", EsTheme.ScreenBg);
+        EsUi.Stretch(bg.rectTransform);
+        if (cvGo.GetComponent<EsPuzzleInput>() == null)
+        {
+            var mark = cvGo.AddComponent<EsPuzzleInput>();
+            mark.what = "plate rotations";
+        }
+
+        var rt = EsUi.Label(cvGo.transform, "T", "LEITOR OPTICO - CHAVE UNIFICADA", 44,
+                            EsTheme.ScreenOn, TextAnchor.UpperCenter, FontStyle.Bold);
+        rt.rectTransform.anchorMin = new Vector2(0, 1); rt.rectTransform.anchorMax = new Vector2(1, 1);
+        rt.rectTransform.offsetMin = new Vector2(0, -95); rt.rectTransform.offsetMax = new Vector2(0, -12);
+
+        var prev = new GameObject("Preview", typeof(RectTransform));
+        prev.transform.SetParent(cvGo.transform, false);
+        var prt = (RectTransform)prev.transform;
+        prt.anchorMin = prt.anchorMax = new Vector2(0.5f, 1f);
+        prt.pivot = new Vector2(0.5f, 1f);
+        prt.sizeDelta = new Vector2(500f, 500f);
+        prt.anchoredPosition = new Vector2(0f, -110f);
+        const float cell = 110f, cgap = 12f, corg = (500f - (4 * cell + 3 * cgap)) / 2f;
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < 4; c++)
+            {
+                var img = EsUi.Img(prev.transform, "Pv_" + r + "_" + c, new Color(0.09f, 0.11f, 0.13f, 1f));
+                var irt = img.rectTransform;
+                irt.anchorMin = irt.anchorMax = new Vector2(0, 1);
+                irt.pivot = new Vector2(0, 1);
+                irt.sizeDelta = new Vector2(cell, cell);
+                irt.anchoredPosition = new Vector2(corg + c * (cell + cgap), -(corg + r * (cell + cgap)));
+                reader.previewCells[r * 4 + c] = img;
+            }
+
+        for (int i = 0; i < 3; i++)
+        {
+            var b = EsUi.ButtonWithLabel(cvGo.transform, "Gir_" + i, "GIRAR " + (i + 1), 36,
+                                         new Color(0.07f, 0.22f, 0.19f, 1f), EsTheme.ScreenOn);
+            var brt = (RectTransform)b.transform;
+            brt.anchorMin = brt.anchorMax = new Vector2(0, 1);
+            brt.pivot = new Vector2(0, 1);
+            brt.sizeDelta = new Vector2(280f, 100f);
+            brt.anchoredPosition = new Vector2(85f + i * 310f, -640f);
+            AddHitTarget(brt, 0.015f, "_Gir" + i);
+            if (b.GetComponent<EsHoverHighlight>() == null) b.gameObject.AddComponent<EsHoverHighlight>();
+            reader.rotateButtons[i] = b;
+        }
+        var rst = EsUi.Label(cvGo.transform, "ReaderStatus", "LEITOR OPTICO - INSIRA AS 3 PLACAS (0/3)", 34,
+                             EsTheme.Amber, TextAnchor.MiddleCenter, FontStyle.Bold);
+        rst.rectTransform.anchorMin = new Vector2(0, 1); rst.rectTransform.anchorMax = new Vector2(1, 1);
+        rst.rectTransform.offsetMin = new Vector2(20, -830); rst.rectTransform.offsetMax = new Vector2(-20, -760);
+        reader.statusLabel = rst;
+        reader.Refresh();
+        reader.Wire();
+
+        Debug.Log("[EscapeRoom] Plate reader built: 3 sockets + OR preview + door link");
+    }
+
+
     // =====================================================================
     // lights
     // =====================================================================
@@ -6378,8 +7308,11 @@ public static class EsSceneBuilder
         roomGo.transform.SetParent(root, false);
         roomGo.transform.position = new Vector3(2.0f, 2.85f, 0.5f);
         var rl = roomGo.AddComponent<Light>();
-        rl.type = LightType.Point; rl.range = 19f; rl.intensity = 1.15f;
-        rl.color = new Color(0.80f, 0.85f, 0.95f);
+        rl.type = LightType.Point; rl.range = 19f; rl.intensity = 0.85f;
+        // Emergency red: Fase 0 (A.E.G.I.S.) starts the room in quarantine light.
+        // Fase 1 (energy mesh) restores blue via EscapeGameManager.SetPowerRestored().
+        // The cool fills (PropFill/SouthFill) stay: readability was measured (D-113).
+        rl.color = new Color(1f, 0.16f, 0.14f);
         res.room = rl;
 
         // dedicated fill so the prop row (terminal / blast door) is readable before the
@@ -6402,6 +7335,23 @@ public static class EsSceneBuilder
         var strip = EsTheme.Box("AlarmStrip", root, new Vector3(2.0f, 2.95f, 5.6f),
                                 new Vector3(9.0f, 0.08f, 0.08f), _alarm);
         res.strip = strip.GetComponent<Renderer>();
+
+        // dedicated warm light over the dead archive (east wall sits outside PropFill):
+        // the five spines must read from metres away, not just up close.
+        var arcGo = new GameObject("ArchiveLight");
+        arcGo.transform.SetParent(root, false);
+        arcGo.transform.position = new Vector3(10.30f, 2.75f, 2.0f);
+        var arc = arcGo.AddComponent<Light>();
+        arc.type = LightType.Point; arc.range = 6.5f; arc.intensity = 1.0f;
+        arc.color = new Color(1.0f, 0.88f, 0.70f);
+
+        // south fill so the waiting area does not fall off into darkness
+        var southGo = new GameObject("SouthFill");
+        southGo.transform.SetParent(root, false);
+        southGo.transform.position = new Vector3(0f, 2.70f, 7.5f);
+        var sf = southGo.AddComponent<Light>();
+        sf.type = LightType.Point; sf.range = 14f; sf.intensity = 0.55f;
+        sf.color = new Color(0.75f, 0.85f, 0.95f);
         return res;
     }
 
@@ -6414,8 +7364,8 @@ public static class EsSceneBuilder
         var go = new GameObject("GameManager");
         go.transform.SetParent(root, false);
         var gm = go.AddComponent<EscapeGameManager>();
-        gm.reserveSeconds = 360f;
-        gm.warnAtSeconds = 120f;
+        gm.reserveSeconds = 3600f;
+        gm.warnAtSeconds = 600f;
         gm.terminal = terminal;
         gm.exitDoor = door;
         gm.roomLight = lights.room;
@@ -6466,12 +7416,19 @@ public static class EsSceneBuilder
     /// See <see cref="EsCrosshair"/>: it is invisible to the UI event system, which is the
     /// guarantee that it can never intercept a click meant for the terminal.
     ///
-    /// There is deliberately no prompt any more. The prompt existed to label what the E key would
-    /// press, and the E key is gone - it typed the keypad code for the player, which is not a
-    /// convenience a puzzle can afford.</summary>
-    static void BuildHud()
+    /// Plus a read-only aim label under it (<see cref="EsAimPrompt"/>). This is NOT the removed
+    /// EsInteractPrompt: nothing is bound to it, so it cannot type the keypad code - it only
+    /// names what PlayerInteractor sees ("Clique para inserir CHAVE DE ACESSO" vs
+    /// "Incompativel com CELULA DE ENERGIA"). The crosshair highlight only tracks canvas
+    /// targets, so without the label the 3D sockets have zero aim feedback.</summary>
+    static void BuildHud(Transform root)
     {
+        // Both HUD objects live under the level root now: scene-root copies from older
+        // builds accumulated forever (the old code only destroyed the crosshair, never
+        // the prompt - fifteen strays and counting), and strays break "first object"
+        // lookups by returning an arbitrary copy.
         foreach (var old in Object.FindObjectsByType<EsCrosshair>()) Object.DestroyImmediate(old.gameObject);
+        foreach (var old in Object.FindObjectsByType<EsAimPrompt>()) Object.DestroyImmediate(old.gameObject);
 
         // The interact prompt is gone, but any canvas already saved into the scene from an earlier
         // build is still sitting there with its black plate, and a type no longer existing is not a
@@ -6491,6 +7448,7 @@ public static class EsSceneBuilder
         }
 
         var cross = new GameObject("EsCrosshair", typeof(RectTransform));
+        cross.transform.SetParent(root, false);
         var cc = cross.AddComponent<Canvas>();
         cc.renderMode = RenderMode.ScreenSpaceOverlay;
         cc.sortingOrder = 500;
@@ -6499,6 +7457,38 @@ public static class EsSceneBuilder
         crt.anchorMin = Vector2.zero; crt.anchorMax = Vector2.one;
         crt.offsetMin = Vector2.zero; crt.offsetMax = Vector2.zero;
         cross.AddComponent<EsCrosshair>();
+
+        // Aim label: same click-safety contract as the crosshair (overlay, no raycaster,
+        // raycastTarget off, blocksRaycasts off). Named AimLabel, NOT PromptText: the stale
+        // prompt cleanup above destroys anything still called PromptText, and Self Test 6
+        // counts those names as orphans.
+        var promptGo = new GameObject("EsAimPrompt", typeof(RectTransform));
+        promptGo.transform.SetParent(root, false);
+        var pc = promptGo.AddComponent<Canvas>();
+        pc.renderMode = RenderMode.ScreenSpaceOverlay;
+        pc.sortingOrder = 501;
+        var prt = (RectTransform)promptGo.transform;
+        prt.anchorMin = Vector2.zero; prt.anchorMax = Vector2.one;
+        prt.offsetMin = Vector2.zero; prt.offsetMax = Vector2.zero;
+        var pgrp = promptGo.AddComponent<CanvasGroup>();
+        pgrp.blocksRaycasts = false;
+        pgrp.interactable = false;
+        var labelGo = new GameObject("AimLabel", typeof(RectTransform));
+        labelGo.transform.SetParent(promptGo.transform, false);
+        var lrt = (RectTransform)labelGo.transform;
+        lrt.anchorMin = lrt.anchorMax = new Vector2(0.5f, 0f);
+        lrt.pivot = new Vector2(0.5f, 0f);
+        lrt.anchoredPosition = new Vector2(0f, 64f);
+        lrt.sizeDelta = new Vector2(900f, 60f);
+        var label = labelGo.AddComponent<UnityEngine.UI.Text>();
+        label.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        label.fontSize = 26;
+        label.alignment = TextAnchor.LowerCenter;
+        label.horizontalOverflow = HorizontalWrapMode.Overflow;
+        label.color = new Color(0.92f, 0.96f, 1f, 0.92f);
+        label.raycastTarget = false;
+        label.text = "";
+        promptGo.AddComponent<EsAimPrompt>();
 
         Debug.Log("[EscapeRoom] Crosshair added (F1 toggles, hides when the cursor is unlocked). "
                   + "No GraphicRaycaster, so it cannot intercept a click. No interact key: it "
@@ -6559,6 +7549,17 @@ public static class EsSceneBuilder
         rig.body = capsule.transform;      // the rig owns pitch and reads yaw from here
         rig.eyeHeight = 1.375f;
         rig.sensitivity = 0.12f;
+
+        // Re-seat the capsule at the root origin. Tests (and play sessions
+        // without scene reload) move the CAPSULE in world space, while the
+        // build only ever re-seated the Player ROOT - so a stale capsule
+        // offset survived every rebuild and the next run started wherever the
+        // last test stood. That is exactly the "impossible" ST5 side-on
+        // failure: aimed from 2 m east of the button at 87 deg off-normal.
+        // The camera is re-posed by the rig every frame in play; its edit
+        // pose is set sane for the same reason.
+        capsule.transform.localPosition = Vector3.zero;
+        camGo.transform.localPosition = new Vector3(0f, 1.375f, 0f);
 
         // neutralise the old third-person rig so it cannot fight us
         var old = GameObject.Find("Player/PlayerFollowCamera");

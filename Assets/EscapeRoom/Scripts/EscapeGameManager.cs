@@ -3,16 +3,17 @@ using UnityEngine.SceneManagement;
 
 namespace EscapeRoom
 {
-    /// <summary>Owns the reserve countdown (the diegetic timer), the win/lose states and the
-    /// ambience bed. The countdown deliberately starts only when the player reboots the
-    /// terminal, so exploring and reading the room is free.</summary>
+    /// <summary>Owns the life-support countdown (the diegetic timer), the win/lose
+    /// states and the ambience bed. Fase 0 (A.E.G.I.S.): 60 minutes of life
+    /// support, room starts on red emergency lighting; the countdown still
+    /// starts only when the player reboots the terminal, so exploring free.</summary>
     public class EscapeGameManager : MonoBehaviour
     {
         public static EscapeGameManager Instance { get; private set; }
 
-        [Header("Reserva critica")]
-        public float reserveSeconds = 360f;
-        public float warnAtSeconds = 120f;
+        [Header("Suporte vital (A.E.G.I.S.)")]
+        public float reserveSeconds = 3600f;
+        public float warnAtSeconds = 600f;
         public float beepEverySeconds = 2f;
 
         [Header("Refs")]
@@ -70,9 +71,10 @@ namespace EscapeRoom
 
             if (terminal != null)
             {
+                // Total minutes, not TimeSpan.Minutes: 3600 s must read "60:00",
+                // not "00:00" (TimeSpan would fold the hour away).
                 int total = Mathf.Max(0, Mathf.CeilToInt(_remaining));
-                var ts = System.TimeSpan.FromSeconds(total);
-                terminal.SetTimer(string.Format("{0:00}:{1:00}", ts.Minutes, ts.Seconds));
+                terminal.SetTimer(string.Format("{0:00}:{1:00}", total / 60, total % 60));
             }
 
             if (_remaining <= 0f)
@@ -105,7 +107,7 @@ namespace EscapeRoom
             if (_running || _finished) return;
             _remaining = reserveSeconds;
             _running = true;
-            NoteMilestone("RESERVA EM CARGA");
+            NoteMilestone("SUPORTE VITAL EM CONTAGEM");
         }
 
         public void NoteMilestone(string label)
@@ -120,12 +122,11 @@ namespace EscapeRoom
             _running = false;
             if (winClip != null) EsAudio.Play(winClip, Vector3.zero, 1f, 0f);
             if (alarmLight != null) alarmLight.intensity = 0f;
-            float bonus = _remaining;
-            var ts = System.TimeSpan.FromSeconds(Mathf.CeilToInt(bonus));
+            int bonus = Mathf.CeilToInt(_remaining);
             if (terminal != null)
-                terminal.ShowEnd("SAIDA LIBERADA",
-                    "Você escapou da Filial 9 com " + string.Format("{0:00}:{1:00}", ts.Minutes, ts.Seconds)
-                    + " de reserva restantes.\n\nA porta blindada se selou atras de voce.",
+                terminal.ShowEnd("QUARENTENA ENCERRADA",
+                    "Voce escapou do No-Zero com " + string.Format("{0:00}:{1:00}", bonus / 60, bonus % 60)
+                    + " de suporte vital restante.\n\nO A.E.G.I.S. liberou a porta do bunker.",
                     new Color(0.24f, 0.85f, 0.64f));
         }
 
@@ -136,9 +137,34 @@ namespace EscapeRoom
             if (failClip != null) EsAudio.Play(failClip, Vector3.zero, 1f, 0f);
             if (alarmLight != null) alarmLight.intensity = 0f;
             if (terminal != null)
-                terminal.ShowEnd("SINAL PERDIDO",
-                    "A reserva de emergencia acabou. As magnetotravas\nreengataram e o terminal se fechou.",
+                terminal.ShowEnd("SUPORTE VITAL ESGOTADO",
+                    "O suporte vital foi drenado.\nO A.E.G.I.S. manteve a quarentena absoluta.",
                     new Color(0.91f, 0.23f, 0.23f));
+        }
+
+        // ---------------------------------------------------------------- A.E.G.I.S. light states
+        // Fase 0: the room starts on red emergency lighting. Fase 1 (energy mesh)
+        // calls SetPowerRestored() as the puzzle reward (red -> blue).
+        [Header("A.E.G.I.S. - estados de luz")]
+        public Color emergencyColor = new Color(1f, 0.16f, 0.14f);
+        public float emergencyIntensity = 0.85f;
+        public Color restoredColor = new Color(0.55f, 0.75f, 1f);
+        public float restoredIntensity = 1.15f;
+
+        public void SetEmergencyLighting()
+        {
+            if (roomLight == null) return;
+            roomLight.color = emergencyColor;
+            roomLight.intensity = emergencyIntensity;
+            NoteMilestone("QUARENTENA ABSOLUTA");
+        }
+
+        public void SetPowerRestored()
+        {
+            if (roomLight == null) return;
+            roomLight.color = restoredColor;
+            roomLight.intensity = restoredIntensity;
+            NoteMilestone("MALHA DE ENERGIA RESTAURADA");
         }
 
         public void Restart()
