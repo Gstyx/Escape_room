@@ -35,6 +35,12 @@ namespace EscapeRoom
         [Header("Portao")]
         public EsHexGrid grid;
 
+        [Header("Saida")]
+        // D-229: who to tell when the logs are solved. The safe gates on this puzzle, and its
+        // refusal overwrites its own standing instruction - so the solve has to repaint it,
+        // or the label lies after the fact (D-226's shape). Wired by the builder; null-safe.
+        public EsSafeKeypad safePad;
+
         [Header("UI")]
         public Button[] blockButtons = new Button[4];
         public Text[] blockLabels = new Text[4];
@@ -132,6 +138,7 @@ namespace EscapeRoom
             if (solved || !IsSolved()) return;
             solved = true;
             if (solvedClip != null) EsAudio.Play(solvedClip, transform.position);
+            if (safePad != null) safePad.OnLogsSolved();
             Refresh();
         }
 

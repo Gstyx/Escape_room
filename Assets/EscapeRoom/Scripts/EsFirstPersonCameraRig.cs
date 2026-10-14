@@ -37,10 +37,21 @@ namespace EscapeRoom
             if (_cam == null) _cam = Camera.main;
         }
 
+        /// <summary>Set by <see cref="EsIntroScreen"/> while the opening card is up.
+        ///
+        /// <para>The rig reads <c>Mouse.delta</c> directly and does not consult the cursor lock,
+        /// so without this the camera rotated behind a title card the player was reading. Static
+        /// because there is exactly one rig and one card, and because <see cref="EsIntroScreen"/>
+        /// clears it in <c>OnDestroy</c> - which is what makes it safe across the scene reload
+        /// that REINICIAR performs.</para>
+        /// <para><c>Apply()</c> still runs while frozen: the rig only stops LISTENING, it does not
+        /// stop being seated on the body.</para></summary>
+        public static bool LookFrozen;
+
         void LateUpdate()
         {
             var m = Mouse.current;
-            if (m != null)
+            if (m != null && !LookFrozen)
             {
                 float dy = m.delta.ReadValue().y;
                 if (Mathf.Abs(dy) > 0.0001f)

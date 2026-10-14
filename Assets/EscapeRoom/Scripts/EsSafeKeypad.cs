@@ -21,6 +21,13 @@ namespace EscapeRoom
         [Header("Cofre")]
         public Transform safeDoorPivot;
 
+        [Header("Ordem")]
+        // D-229: who the safe takes orders from. The PIN is knowledge from the logs, so the
+        // keypad stays dead until the logs are solved - measured live, typing 3719 with zero
+        // puzzles solved opened the safe and skipped hex and logs outright. Null means unwired,
+        // which reads as solved (same convention as the log station's grid gate).
+        public EsLogSortPuzzle logPuzzle;
+
         [Header("Audio")]
         public AudioClip clickClip;
         public AudioClip errorClip;
@@ -60,6 +67,22 @@ namespace EscapeRoom
             if (_lastKeyFrame == Time.frameCount && _lastKey == cap) return;
             _lastKeyFrame = Time.frameCount;
             _lastKey = cap;
+
+            // D-229: knowledge only counts once it exists. The safe is PIN-gated by design -
+            // there is no power lock on a mechanical keypad - but a correct PIN typed before
+            // the logs are solved is a guess, not a deduction, and it used to open the safe.
+            // Refused with the reason on the status line (an echo buzz alone reads as broken),
+            // and the dedupe above already ran, so double-dispatched clicks cannot buzz twice.
+            if (logPuzzle != null && !logPuzzle.solved)
+            {
+                if (errorClip != null) EsAudio.Play(errorClip, transform.position);
+                if (statusLabel != null)
+                {
+                    statusLabel.text = "COFRE SEM DADOS - ORDENE OS LOGS PRIMEIRO";
+                    statusLabel.color = EsTheme.Warn;
+                }
+                return;
+            }
 
             if (clickClip != null) EsAudio.Play(clickClip, transform.position);
             if (cap == "ENTER") { Submit(); return; }
@@ -142,6 +165,18 @@ namespace EscapeRoom
                 statusLabel.text = "PIN 4 DIGITOS - DEL APAGA - LIMPAR ZERA";
                 statusLabel.color = EsTheme.Amber;
             }
+        }
+
+        /// <summary>Called when the logs are solved (D-229). Repaints the keypad's standing
+        /// instruction, which the gate above may have overwritten with the refusal: without
+        /// this a player who tried the safe early, solved the logs, and came back would read
+        /// "ORDENE OS LOGS PRIMEIRO" with the logs already ordered - the D-226 stale-label
+        /// shape, one station over. No-op once solved.</summary>
+        public void OnLogsSolved()
+        {
+            if (solved || statusLabel == null) return;
+            statusLabel.text = "PIN 4 DIGITOS - DEL APAGA - LIMPAR ZERA";
+            statusLabel.color = EsTheme.Amber;
         }
     }
 }

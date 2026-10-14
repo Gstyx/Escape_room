@@ -7,8 +7,9 @@ namespace EscapeRoom
     /// any acrylic plate (all share itemKey "placa": OR is commutative, so the
     /// stack order carries no information and only the rotations are checked).
     /// The live OR of the seated plates is previewed on a 4x4 lamp grid; when
-    /// it equals the digit-4 template the reader latches, the A.E.G.I.S.
-    /// prompt clears and the bunker door force-opens.</summary>
+    /// it equals the digit-4 template the reader latches and dispenses the exit
+    /// card. The card opens the blast door at its socket, and walking out wins
+    /// (D-230) - the end screen fires past the doorway, never at the reader.</summary>
     public class EsPlateReader : MonoBehaviour
     {
         public ItemSocket[] sockets = new ItemSocket[3];
@@ -27,6 +28,12 @@ namespace EscapeRoom
         public Text statusLabel;
         public BlastDoor door;
         public EscapeGameManager gm;
+
+        /// <summary>The exit card, pre-built inactive on the reader tray (D-230). Lit on
+        /// approval - the physical takeaway the player carries to the door socket. A
+        /// serialized reference, set by the builder, so it survives the scene save like
+        /// every other reference this builder owns.</summary>
+        public GameObject exitCard;
 
         public AudioClip rotateClip;
         public AudioClip approveClip;
@@ -126,11 +133,20 @@ namespace EscapeRoom
             if (approveClip != null) EsAudio.Play(approveClip, transform.position);
             if (statusLabel != null)
             {
-                statusLabel.text = "CHAVE ACEITA - EXECUCAO DE SEGURANCA ENCERRADA";
+                statusLabel.text = "CHAVE ACEITA - RETIRE O CARTAO DE SAIDA";
                 statusLabel.color = EsTheme.ScreenOn;
             }
             Refresh();
-            if (door != null) door.ForceOpen();
+            // D-230: the reader no longer opens the door. It dispenses the exit card; the
+            // card opens the door at its socket, and walking out wins past the doorway. The
+            // door forced open here used to Win() on the spot, which showed the end screen on
+            // top of the reader and the player never walked out.
+            //
+            // Miswire safety, in this order: a missing card must never soft-lock the run, so
+            // without one the door still opens (the card beat is skipped, the win is not).
+            // Without a door either, last resort is the old direct Win.
+            if (exitCard != null) exitCard.SetActive(true);
+            else if (door != null) door.ForceOpen();
             else if (gm != null) gm.Win();
         }
 

@@ -49,6 +49,15 @@ namespace EscapeRoom
         Coroutine _routine;
         float _objectiveTimer;
 
+        // D-225: the status line is polled (it tracks the puzzles), and the purification notice
+        // from EscapeGameManager.Lose() is written into that same line for four whole seconds.
+        // Without this flag the poll would stamp over the notice ~8 times in that window and the
+        // two-beat defeat the player asked for would collapse back into one - the notice would
+        // appear and vanish so fast it read as a flicker. EscapeGameManager therefore writes the
+        // notice through HoldStatus(), which sets the flag; RefreshStatus() then refuses to touch
+        // the line until ResetStatusHold() runs, which happens on reboot and on restart.
+        bool _statusHeld;
+
         void Start()
         {
             Phase = TerminalPhase.Offline;
@@ -74,6 +83,7 @@ namespace EscapeRoom
             {
                 _objectiveTimer = 0.5f;
                 RefreshObjective();
+                RefreshStatus();
             }
         }
 
@@ -93,7 +103,12 @@ namespace EscapeRoom
             else if (plateReader != null && !plateReader.approved)
                 hint = "OBJETIVO: REVELE O DIGITO NO LEITOR OPTICO (LESTE)";
             else
-                hint = "OBJETIVO: FUJA PELA PORTA DO BUNKER (NORTE)";
+                // "BUNKER" was mine and it was wrong (D-221): this room is a bank branch inside a crypto
+                // research module - Filial 9, BANCO ARTICO - not a bunker, and the fiction never had
+                // one. "SAIDA" is also 9 chars shorter than "PORTA DO BUNKER", so the objective line
+                // cannot wrap where it used to; this string is written at RUNTIME, which means
+                // `Check UI text overflow` never sees it and the length has to be reasoned about.
+                hint = "OBJETIVO: FUJA PELA SAIDA (NORTE)";
             hintText.text = hint;
         }
 
@@ -158,10 +173,17 @@ namespace EscapeRoom
                     SetStatus("REINICIANDO...", EsTheme.Amber);
                     break;
                 case TerminalPhase.Online:
-                    SetStatus("SISTEMAS NO AR - SIGA O OBJETIVO", EsTheme.ScreenOn);
+                    // D-225: the status line stopped being a prompt. It used to read
+                    // "SISTEMAS NO AR - SIGA O OBJETIVO", which restated the objective line one
+                    // row above it - two lines, one piece of information. It now tracks the room's
+                    // state instead, and RefreshStatus picks the string; the hold is cleared here
+                    // so a reboot after a held status can write again.
+                    ResetStatusHold();
+                    RefreshStatus();
                     RefreshObjective();
                     break;
                 case TerminalPhase.Dead:
+                    ResetStatusHold();
                     SetStatus("SINAL PERDIDO", EsTheme.Warn);
                     break;
             }
@@ -170,6 +192,111 @@ namespace EscapeRoom
         public void SetStatus(string msg, Color color)
         {
             if (statusText != null) { statusText.text = msg; statusText.color = color; }
+        }
+
+        /// <summary>Write the status line and stop the puzzle poll from overwriting it.</summary>
+        public void HoldStatus(string msg, Color color)
+        {
+            _statusHeld = true;
+            SetStatus(msg, color);
+        }
+
+        public void ResetStatusHold() { _statusHeld = false; }
+
+        /// <summary>The mesh came on. Repaint everything that reads the power gate.
+        ///
+        /// <para><b>Why this exists</b> (D-226): the log station gates itself on
+        /// <c>grid.powerRestored</c> and paints its label from inside its own click handlers.
+        /// Nothing told it the gate had opened, so a player who solved the mesh before rebooting
+        /// the terminal arrived at a station reading <c>SEM ENERGIA - RESTAURE A MALHA HEXAGONAL
+        /// </c> while the mesh was lit and the ceiling was burning. Two lines of the room
+        /// contradicting each other on screen, and the wrong one was the one the player was
+        /// looking at.</para>
+        ///
+        /// <para><b>Why it lives on the terminal</b> and not in each puzzle: the terminal already
+        /// holds a reference to every station, and <c>EscapeGameManager.SetPowerRestored()</c> -
+        /// the single choke point the hex reward goes through - already holds a reference to the
+        /// terminal. So this is one edge, not four puzzles each remembering to notify someone.</para>
+        ///
+        /// <para>The status line is repainted too, and deliberately <i>after</i> the station: if the
+        /// status ever needed a hold released here, the station would win.</para></summary>
+        public void OnPowerRestored()
+        {
+            if (logPuzzle != null) logPuzzle.Refresh();
+            RefreshStatus();
+            RefreshObjective();
+        }
+
+        /// <summary>The status line as a **state of the room**, distinct from the objective
+        /// line above it (D-225).
+        ///
+        /// <para>The split is the whole point. <c>RefreshObjective</c> says <i>what to do next</i>
+        /// and walks the three puzzles; this line says <i>what the room has become</i>. Two lines
+        /// carrying the same information would be one line, and the objective is already spoken
+        /// for - so the status is free to describe progress instead of restating the task.</para>
+        ///
+        /// <para><b>It follows the same order as the objective</b> (power, logs, safe, reader),
+        /// which is what makes it read as consequence rather than decoration: the room changes
+        /// state exactly when the player changes it.</para>
+        ///
+        /// <para>Every string is written at RUNTIME, so <c>Check UI text overflow</c> cannot see
+        /// them - they were measured against the real rect instead (see D-225 in DECISOES.md).</para></summary>
+        public void RefreshStatus()
+        {
+            if (_statusHeld || statusText == null) return;
+
+            string msg;
+            Color color;
+            if (hex != null && !hex.powerRestored)
+            {
+                if (hex.ReceptorEnergized())
+                {
+                    // D-228: the near-miss gets its own state. The player fed the receptor but a
+                    // leak is standing, so the strict rule withholds the reward - and before this
+                    // branch the terminal kept saying ISOLAMENTO SELADO, the same sentence as when
+                    // nothing is done. Measured in the player's shoes: receptor lit, terminal
+                    // unchanged, lights unchanged - which reads as "nothing happens". This mirrors
+                    // the hex panel's own amber label on the big screen the player looks at next.
+                    // It names the STATE, never the location: saying where the leak is would be
+                    // solving the puzzle, saying that there is one is reporting the room.
+                    msg = "RECEPTOR ALIMENTADO - VAZAMENTO NA MALHA";
+                    color = EsTheme.Amber;
+                }
+                else
+                {
+                    // "ISOLAMENTO SELADO" is not scenery. It is the one fact the room can assert that
+                    // the player cannot: there is no second way out, and the only way out is the one
+                    // the objective line describes. Naming it here means the terminal is refusing to
+                    // help and only reporting - which is what a system that is right and will not
+                    // explain itself looks like (D-219). Deliberately NOT "SAIDA BLOQUEADA": that
+                    // would make the containment sound like a lock and the A.E.G.I.S. like a jailer.
+                    msg = "ISOLAMENTO SELADO - SAIDA SO PELA REATIVACAO";
+                    color = EsTheme.Warn;
+                }
+            }
+            else if (logPuzzle != null && !logPuzzle.solved)
+            {
+                msg = "REDE ALIMENTADA - LOGS PENDENTES";
+                color = EsTheme.ScreenOn;
+            }
+            else if (safePad != null && !safePad.solved)
+            {
+                msg = "LOGS VERIFICADOS - COFRE TRAVADO";
+                color = EsTheme.ScreenOn;
+            }
+            else if (plateReader != null && !plateReader.approved)
+            {
+                msg = "COFRE ABERTO - REGISTRO DE 2142";
+                color = EsTheme.ScreenOn;
+            }
+            else
+            {
+                // Everything the room knows how to say, it has said. The line stops claiming
+                // anything, which is what "the door is open" should look like on a display.
+                msg = "PLACA AUTORIZADA - SAIDA LIBERADA";
+                color = EsTheme.Amber;
+            }
+            SetStatus(msg, color);
         }
 
         public void SetTimer(string s)

@@ -107,13 +107,18 @@ public static class EsSceneBuilder
         BuildAegisDressing(root.transform);
         var lights = BuildLights(root.transform);
         var gm = BuildGameManager(root.transform, terminal, door, lights);
+        // Assigned BEFORE SetEmergencyLighting, because that call now switches the ceiling lamps
+        // off. Collected after BuildDressing, which is what creates them.
+        gm.ceilingLamps = CollectCeilingLamps();
         gm.SetEmergencyLighting();
         var hexGrid = BuildHexPanel(root.transform, gm);
         BuildLogStation(root.transform, hexGrid);
         BuildPlateReaderStation(root.transform, door, gm);
+        BuildExitTrigger(root.transform, door, gm);
         WireTerminalObjectives(terminal);
 
         BuildEventSystem(root.transform);
+        BuildIntroPanel(root.transform, terminal);
         BuildHud(root.transform);
         // The floor grid lives under EscapeRoom_Root, and Build() has just destroyed and recreated
         // that root - so building the grid anywhere but here means it silently disappears on the
@@ -143,10 +148,148 @@ public static class EsSceneBuilder
         FixFirstPersonRig();
         WireWorldSpaceCanvases();
         BuildPostFx();
+        // The user's six Light_01 fixtures are at the scene ROOT, outside ROOT, so nothing this
+        // build does can hang them - and a light fixture hanging 0,86 m under a 3,70 m ceiling is
+        // the kind of defect that survives any number of Build Levels precisely because nobody
+        // owns it. It has to be in the chain or "Build Level" keeps producing floating lights.
+        MountFloatingLights();
+        ClampKitEmissives();
 
         EditorSceneManager.MarkSceneDirty(scene);
         EditorSceneManager.SaveScene(scene);
         Debug.Log("[EscapeRoom] Level built and saved into " + scenePath);
+    }
+
+    /// <summary>Reaches every floating light fixture up to the ceiling with a metal rod, the way
+    /// <c>MakeCeilingPanel</c> and <c>MakeHangingSign</c> already do for the objects this builder owns.
+    ///
+    /// <para><b>What was floating.</b> The six <c>Light_01</c> fixture groups are the user's tiles and
+    /// sit at the scene ROOT, so <c>Build()</c> - which destroys and recreates only <c>ROOT</c> - never
+    /// touched them. Their housings top out at y = 2,84 with the ceiling underside at 3,70: an 86 cm
+    /// gap under a lit fixture. The six <c>CeilPanel</c> lamps built in D-177 are NOT affected - those
+    /// already carry rods up to the ceiling.</para>
+    ///
+    /// <para><b>Why the selector is strict.</b> Three looser tests all select the wrong things, so the
+    /// pass requires a root-level group whose name starts with <c>Light_01</c> AND that carries both a
+    /// light and a mesh. The six nested <c>Light_01</c> mesh children fail the root-level test (their
+    /// parent is the fixture group). "Bounds top is near 2,9" fails on a <c>Wall_Simple_01</c> that
+    /// happens to reach 2,89 and on a <c>FrostPillar</c> cap at 2,72..2,80 - neither is a lamp. Anything
+    /// less specific hangs rods off walls.</para>
+    ///
+    /// <para><b>Idempotent</b> because it clears its own host folder before rebuilding - Build() would
+    /// wipe it anyway, but the pass is also a standalone menu item, and a standalone run has to leave
+    /// the same result as the chained one or "the two disagree" is back (see D-152).</para></summary>
+    [MenuItem("Tools/Escape Room/Mount the floating light fixtures to the ceiling")]
+    public static void MountFloatingLights()
+    {
+        DimUserFixturesToReserve();
+        var root = GameObject.Find(ROOT);
+        if (root == null) { Debug.LogWarning("[Mount] sem " + ROOT + " - rode Build Level antes"); return; }
+
+        var dressing = root.transform.Find("Dressing");
+        if (dressing == null) { Debug.LogWarning("[Mount] sem Dressing"); return; }
+        var host = dressing.Find("LightMounts");
+        if (host == null)
+        {
+            var go = new GameObject("LightMounts");
+            go.transform.SetParent(dressing, false);
+            host = go.transform;
+        }
+        // collect first, destroy after - D-139: destroying children WHILE enumerating them skips
+        // roughly half of them per run, which is how a repair ends up non-idempotent without ever
+        // reporting that it did anything.
+        var velho = new List<Transform>();
+        for (int i = host.childCount - 1; i >= 0; i--) velho.Add(host.GetChild(i));
+        foreach (var ch in velho) Object.DestroyImmediate(ch.gameObject);
+
+        var log = new List<string>();
+        int montadas = 0, jaNoTeto = 0;
+        foreach (var t in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (t == null || t.parent != null) continue;
+            if (!t.name.StartsWith("Light_01", System.StringComparison.Ordinal)) continue;
+
+            bool temLuz = false, temMesh = false;
+            float top = -999f, cx = 0f, cz = 0f;
+            foreach (Transform ch in t)
+            {
+                if (ch.GetComponentInChildren<Light>(true) != null) temLuz = true;
+                var rb = ch.GetComponent<Renderer>();
+                if (rb == null) continue;
+                temMesh = true;
+                var b = rb.bounds;
+                if (b.max.y > top) { top = b.max.y; cx = (b.min.x + b.max.x) * 0.5f; cz = (b.min.z + b.max.z) * 0.5f; }
+            }
+            if (!temLuz || !temMesh) continue;
+
+            float h = CEIL_WANTED - top;
+            if (h <= 0.01f) { jaNoTeto++; continue; }
+
+            var g = new GameObject("Mount_" + t.name);
+            g.transform.SetParent(host, false);
+            g.transform.position = new Vector3(cx, top, cz);
+            EsTheme.Box("Haste", g.transform, new Vector3(0f, h * 0.5f, 0f),
+                        new Vector3(0.04f, h, 0.04f), _metal);
+            EsTheme.Box("Flange", g.transform, new Vector3(0f, h, 0f),
+                        new Vector3(0.16f, 0.02f, 0.16f), _metal);
+
+            montadas++;
+            log.Add(t.name + "  fixo em (" + cx.ToString("0.00") + "," + cz.ToString("0.00")
+                 + ")  topo " + top.ToString("0.00") + " -> forro " + CEIL_WANTED.ToString("0.00")
+                 + ", haste de " + h.ToString("0.00") + " m");
+        }
+
+        // ---- builder-owned pieces, told by NAME rather than by a rule ----
+        // The rule above is strict because a loose one hangs rods off walls (D-191). Pieces THIS
+        // builder owns cannot be told from a wall by geometry either, so they are named here - the
+        // same call D-148/151 already forced for walls no geometric rule can separate. A name is not
+        // an identity, so each one is still MEASURED before anything is built: an entry that is
+        // missing, has no renderer, or already touches the ceiling is reported and skipped, never
+        // silently "fixed" by stacking rods on nothing.
+        var porNome = new[] { "AlarmStrip" };
+        foreach (var nome in porNome)
+        {
+            var alvo = root.transform.Find(nome);
+            if (alvo == null) { log.Add(nome + "  nao encontrado sob " + ROOT + " (pulado)"); continue; }
+            var rb = alvo.GetComponent<Renderer>();
+            if (rb == null) { log.Add(nome + "  sem renderer (pulado)"); continue; }
+            var b = rb.bounds;
+            float h2 = CEIL_WANTED - b.max.y;
+            if (h2 <= 0.01f) { jaNoTeto++; log.Add(nome + "  ja encosta no forro"); continue; }
+
+            // One rod in the middle of a 9 m strip reads as a mistake, so the rods are spread along
+            // its LONG axis at ~3 m spacing and each gets its own flange. n == 1 keeps a short piece
+            // honest instead of dividing by (n - 1).
+            float spanX = b.max.x - b.min.x, spanZ = b.max.z - b.min.z;
+            bool aoLongoDeX = spanX >= spanZ;
+            float span = aoLongoDeX ? spanX : spanZ;
+            int n = Mathf.Max(1, Mathf.RoundToInt(span / 3f));
+            float cxb = (b.min.x + b.max.x) * 0.5f, czb = (b.min.z + b.max.z) * 0.5f;
+
+            var g2 = new GameObject("Mount_" + nome);
+            g2.transform.SetParent(host, false);
+            g2.transform.position = new Vector3(cxb, b.max.y, czb);
+            for (int i = 0; i < n; i++)
+            {
+                float o = n == 1 ? 0f : (-span * 0.5f) + span * i / (n - 1);
+                var lp = aoLongoDeX ? new Vector3(o, h2 * 0.5f, 0f) : new Vector3(0f, h2 * 0.5f, o);
+                EsTheme.Box("Haste" + i, g2.transform, lp, new Vector3(0.04f, h2, 0.04f), _metal);
+                var lpF = aoLongoDeX ? new Vector3(o, h2, 0f) : new Vector3(0f, h2, o);
+                EsTheme.Box("Flange" + i, g2.transform, lpF, new Vector3(0.16f, 0.02f, 0.16f), _metal);
+            }
+
+            montadas++;
+            log.Add(nome + "  em (" + cxb.ToString("0.00") + "," + czb.ToString("0.00")
+                 + ")  topo " + b.max.y.ToString("0.00") + " -> forro " + CEIL_WANTED.ToString("0.00")
+                 + ", " + n + " haste(s) de " + h2.ToString("0.00") + " m ao longo de "
+                 + (aoLongoDeX ? "X" : "Z"));
+        }
+
+        foreach (var l in log) Debug.Log("[Mount] " + l);
+        Debug.Log("[Mount] forro y = " + CEIL_WANTED.ToString("0.00") + "; pendurou " + montadas
+                  + " luminaria(s) flutuante(s) com haste ate o forro, " + jaNoTeto
+                  + " ja encostavam no forro. As 6 CeilPanel do D-177 ja nascem com haste e nao entram aqui.");
+        SaveSceneNow();
     }
 
     // =====================================================================
@@ -1557,6 +1700,11 @@ public static class EsSceneBuilder
         Color lightC = Color.black; float lightI = 0f;
         bool hasLight = grid.gm != null && grid.gm.roomLight != null;
         if (hasLight) { lightC = grid.gm.roomLight.color; lightI = grid.gm.roomLight.intensity; }
+        // D-217: snapshot the ceiling lamps too, because solving the mesh switches them on.
+        var lampsBefore = grid.gm != null && grid.gm.ceilingLamps != null ? grid.gm.ceilingLamps : new Light[0];
+        var lampsBeforeI = new float[lampsBefore.Length];
+        bool hasLamps = lampsBefore.Length > 0;
+        for (int li = 0; li < lampsBefore.Length; li++) lampsBeforeI[li] = lampsBefore[li].intensity;
 
         // 1. neighbour parity table round-trips everywhere
         int bad = 0, total = 0;
@@ -1766,10 +1914,19 @@ public static class EsSceneBuilder
             grid.DebugResetPower();
         }
         if (hasLight) { grid.gm.roomLight.color = lightC; grid.gm.roomLight.intensity = lightI; }
+        // D-217: the line above restores the room light by WRITING THE FIELD, which bypasses
+        // SetEmergencyLighting() - and SetPowerRestored() also switches the six ceiling lamps. So
+        // this test was leaving the ceiling lit after a "board restored" run, exactly the residue
+        // D-194 is about, in a new costume. Restored through the same snapshot so the two halves of
+        // the lighting state can no longer disagree.
+        if (hasLamps)
+            for (int li = 0; li < lampsBefore.Length; li++)
+                if (lampsBefore[li] != null) lampsBefore[li].intensity = lampsBeforeI[li];
         grid.rotateClip = rc; grid.solvedClip = sc;
 
         Debug.Log("[SelfTest13] VERDICT = " + (fails == 0 ? "PASS (8/8)" : "FAIL (" + fails + ")")
-                  + " - board restored");
+                  + " - board restored"
+                  + (hasLamps ? " (lighting restored too)" : " (NO ceiling lamps to restore)"));
     }
 
     /// <summary>Searches k-move perturbations of the shipped solution for a state
@@ -1935,14 +2092,55 @@ public static class EsSceneBuilder
 
         var tc = Object.FindFirstObjectByType<TerminalController>();
         bool endWas = tc != null && tc.endPanel != null && tc.endPanel.activeSelf;
+        var gm = Object.FindFirstObjectByType<EscapeGameManager>();
+        var trig = Object.FindFirstObjectByType<EsExitTrigger>();
+        if (gm == null) { Debug.LogError("[SelfTest15] no EscapeGameManager"); return; }
+        if (trig == null) { Debug.LogError("[SelfTest15] no EsExitTrigger"); return; }
         reader.CheckAndReward();
-        bool okWin = reader.approved && door.IsOpen;
-        Debug.Log("[SelfTest15] approved=" + reader.approved + " door open=" + door.IsOpen + "   "
-                  + (!okWin ? "FAIL" : "PASS (A.E.G.I.S. cleared)"));
+        bool okLatch = reader.approved;
+        Debug.Log("[SelfTest15] approved=" + reader.approved + "   "
+                  + (okLatch ? "PASS (latched)" : "FAIL"));
+        if (!okLatch) fails++;
+
+        // D-230: the reader dispenses, it does not open. The card must be awake on the tray.
+        var cardGo = reader.exitCard;
+        bool cardOut = cardGo != null && cardGo.activeSelf;
+        Debug.Log("[SelfTest15] exit card dispensed = " + (cardOut ? "PASS" : "FAIL"));
+        if (!cardOut) fails++;
+
+        // the card opens the door at its socket, through the real event path: Wire() the
+        // same call Start() makes in play, then insert the real item into the real socket.
+        door.WireCardSocket();
+        var cardItem = cardGo != null ? cardGo.GetComponent<GrabbableItem>() : null;
+        bool inserted = cardItem != null && door.cardSocket != null
+                        && door.cardSocket.Interact(cardItem);
+        bool okDoor = inserted && door.IsOpen;
+        Debug.Log("[SelfTest15] card in door socket, door open = " + (okDoor ? "PASS" : "FAIL"));
+        if (!okDoor) fails++;
+
+        var bulk = door.bulkhead;
+        bool bulkOut = bulk == null || !bulk.activeSelf;
+        Debug.Log("[SelfTest15] bulkhead retracted = " + (bulkOut ? "PASS" : "FAIL"));
+        if (!bulkOut) fails++;
+
+        // walking out wins, past the doorway - driven with the real capsule collider
+        // through the real routine, not a copy (the FirstSolidHit convention).
+        bool okWin = false;
+        var cap = GameObject.Find("Player/PlayerCapsule");
+        var cc = cap != null ? cap.GetComponent<Collider>() : null;
+        if (cc != null)
+        {
+            trig.TryWin(cc);
+            okWin = tc != null && tc.endPanel != null && tc.endPanel.activeSelf;
+        }
+        Debug.Log("[SelfTest15] walk-out wins = " + (okWin ? "PASS (end panel up)" : "FAIL"));
         if (!okWin) fails++;
 
         // restore everything the drive touched
         foreach (var s in reader.sockets) if (s != null) s.Reset();
+        if (door.cardSocket != null) door.cardSocket.Reset();
+        if (cardGo != null) cardGo.SetActive(false);
+        if (bulk != null) bulk.SetActive(true);
         for (int i = 0; i < 3; i++)
         {
             var g = plates[i].GetComponent<GrabbableItem>();
@@ -1955,8 +2153,10 @@ public static class EsSceneBuilder
         }
         reader.DebugReset();
         door.DebugReset();
+        trig.DebugReset();
+        gm.DebugResetFinish();
         if (tc != null && tc.endPanel != null) tc.endPanel.SetActive(endWas);
-        Debug.Log("[SelfTest15] VERDICT = " + (fails == 0 ? "PASS (6/6)" : "FAIL (" + fails + ")")
+        Debug.Log("[SelfTest15] VERDICT = " + (fails == 0 ? "PASS (10/10)" : "FAIL (" + fails + ")")
                   + " - scene restored");
     }
 
@@ -4929,6 +5129,210 @@ public static class EsSceneBuilder
             Debug.LogError("[Save] SaveScene FAILED - the repair is in memory only and will be lost");
     }
 
+    /// <summary>Dims the six user `Light_01` fixtures, which sit at the scene ROOT.
+    ///
+    /// <para><b>Why a pass and not a scene edit.</b> These objects are outside <c>ROOT</c>, so a
+    /// hand-edited intensity in the inspector survives nothing: Build() never touches them, and the
+    /// day someone changes them in the builder the file and the level quietly disagree. Anything
+    /// that must persist belongs in the chain (the D-152 / D-152 lesson, third sighting).</para>
+    ///
+    /// <para><b>Why they go dark.</b> The room is a branch running on reserves with no power. Measured
+    /// at the centre of the room, these six contributed 36% of all punctual light - more than the
+    /// emergency wash, more than the ceiling panels - and they are the brightest fixtures in the
+    /// scene at 0,30 each. That is the opposite of the fiction: normal lamps are the first thing a
+    /// blackout kills. The player chose to switch them off rather than dim them.</para>
+    ///
+    /// <para>Named and counted, per D-01: every tile this touches is reported by name, and the pass
+    /// is idempotent - it writes an absolute intensity, so running it twice is the same as once.</para></summary>
+    static void DimUserFixturesToReserve()
+    {
+        var log = new List<string>();
+        int n = 0;
+        foreach (var t in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (t == null || t.parent != null) continue;
+            if (!t.name.StartsWith("Light_01", System.StringComparison.Ordinal)) continue;
+            var l = t.GetComponentInChildren<Light>(true);
+            if (l == null) continue;
+            if (Mathf.Approximately(l.intensity, 0f)) continue;
+            log.Add(t.name + "  int " + l.intensity.ToString("0.00") + " -> 0,00 (sem energia)");
+            l.intensity = 0f;
+            n++;
+        }
+        foreach (var s in log) Debug.Log("[Reserve] " + s);
+        Debug.Log("[Reserve] apagou " + n + " das 6 luminarias Light_01 do jogador (ficam apagadas: "
+                  + (6 - n) + "). Sao as tiles dele e por isso e um pass, nao edicao de cena.");
+    }
+
+    /// <summary>Clamps kit-sourced emissive materials that would clip to flat white.
+    ///
+    /// <para><b>Why this exists at all.</b> With post-processing off (D-205) there is no ACES tone map
+    /// left to contain a bright emissive, so anything above 1.0 renders as undifferentiated white.
+    /// Six of the builder's own materials were over (up to 2,40) and are now authored lower. This pass
+    /// exists for the ones the builder does NOT own: <c>Neon_01.mat</c>, from the 3D Free Modular Kit,
+    /// sits at (1,72 / 1,31 / 0,98) and is referenced by 6+ objects in the room - it was the single
+    /// material still clipping after the builder's own were fixed, which is exactly the kind of thing
+    /// that only shows up if you measure the scene instead of reading the builder.</para>
+    ///
+    /// <para><b>Kit assets are the player's.</b> So: it writes the value rather than swapping the
+    /// material, it touches only emission (never base colour, metallic or smoothness), it reports
+    /// every asset by path, and it is idempotent because it writes an absolute value. Reverting is a
+    /// single number in a .mat. This mirrors <c>MakeKitMaterialsTwoSided</c>, which already writes
+    /// to kit materials for the same reason - an inherited emissive has to be corrected somewhere.</para></summary>
+    static void ClampKitEmissives()
+    {
+        const float ceiling = 0.60f;
+        var log = new List<string>();
+        var mats = AssetDatabase.FindAssets("t:Material", new[] { "Assets/Barking_Dog" });
+        foreach (var guid in mats)
+        {
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            var m = AssetDatabase.LoadAssetAtPath<Material>(path);
+            if (m == null || !m.HasProperty("_EmissionColor")) continue;
+            var e = m.GetColor("_EmissionColor");
+            float mx = Mathf.Max(e.r, Mathf.Max(e.g, e.b));
+            if (mx <= ceiling) continue;
+            float k = ceiling / mx;
+            m.SetColor("_EmissionColor", e * k);
+            EditorUtility.SetDirty(m);
+            log.Add(m.name + "  " + path + "  emissao " + e.ToString("0.00")
+                 + " -> " + (e * k).ToString("0.00") + "  (fator " + k.ToString("0.00") + ")");
+        }
+        foreach (var l in log) Debug.Log("[Emissive] " + l);
+        Debug.Log("[Emissive] clampou " + log.Count + " material(is) do kit acima de "
+                  + ceiling.ToString("0.00") + "; sem ACES (D-205) acima disso vira branco chapado. "
+                  + "Os materiais do proprio builder ja sao autorados abaixo do teto.");
+        if (log.Count > 0) AssetDatabase.SaveAssets();
+    }
+
+    /// <summary>Measures how bright the room ACTUALLY renders, and which term is responsible.
+    ///
+    /// <para><b>Why this exists.</b> For several rounds the player said "the game is too bright" and I
+    /// answered by cutting lights - which barely moved anything, because I was reading the light
+    /// settings instead of the image. The chain that produced the wrong answer: every check in this
+    /// file inspects <i>configuration</i> (intensities, colliders, bounds, text), so nothing ever
+    /// asked what the frame looks like. Then a single ablation on the rendered frame showed 75% of
+    /// the light was specular reflection from the skybox - invisible in every configuration check,
+    /// because the value being wrong was a RenderSettings field nobody thought to read.</para>
+    ///
+    /// <para><b>What it does.</b> Renders the main camera through the SRP into a small RenderTexture,
+    /// reads it back, and reports mean and max luminance. Then it turns each contributor off in turn
+    /// and reports how much each one was actually worth - the number that matters is the DELTA, not
+    /// the total, because a term can be large in the scene and still contribute nothing to the
+    /// image. Directions are restored in a finally block: a check that leaves the scene modified is
+    /// not a check, it is an edit.</para>
+    ///
+    /// <para>Run it in Play Mode if you can - in Edit Mode the camera is not driven by the rig, so the
+    /// framing is whatever the last editor position left, and the number is less meaningful.</para></summary>
+    [MenuItem("Tools/Escape Room/Check how bright the room renders")]
+    public static void CheckRenderBrightness()
+    {
+        var cam = Camera.main;
+        if (cam == null) { Debug.LogWarning("[Bright] sem Camera.main"); return; }
+
+        const int W = 240, H = 135;
+        var rt = new RenderTexture(W, H, 24, RenderTextureFormat.ARGB32);
+        var tex = new Texture2D(W, H, TextureFormat.RGB24, false);
+        rt.Create();
+        double maxOut = 0;
+
+        System.Func<float> measure = delegate()
+        {
+            var req = new UnityEngine.Rendering.Universal.UniversalRenderPipeline.SingleCameraRequest();
+            req.destination = rt;
+            if (!RenderPipeline.SupportsRenderRequest(cam, req)) { maxOut = -1; return -1f; }
+            RenderPipeline.SubmitRenderRequest(cam, req);
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            tex.ReadPixels(new Rect(0, 0, W, H), 0, 0);
+            tex.Apply();
+            RenderTexture.active = prev;
+            var px = tex.GetPixels32();
+            float sum = 0f, mx = 0f;
+            foreach (var c in px)
+            {
+                float l = (0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b) / 255f;
+                sum += l;
+                if (l > mx) mx = l;
+            }
+            maxOut = mx;
+            return sum / px.Length;
+        };
+
+        float ambIntensity = RenderSettings.ambientIntensity;
+        float refl = RenderSettings.reflectionIntensity;
+        var dir = new List<Light>();
+        var pts = new List<Light>();
+        foreach (var L in Object.FindObjectsByType<Light>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (L == null) continue;
+            if (L.type == LightType.Directional) dir.Add(L);
+            else if (L.type == LightType.Point && L.intensity > 0f) pts.Add(L);
+        }
+
+        float b = measure();
+        if (b < 0f)
+        {
+            Debug.LogWarning("[Bright] o SRP nao aceitou o render request - rode em Play Mode, ou a "
+                             + "camera nao esta em uma tela valida. Nada foi medido e nada foi alterado.");
+            Object.DestroyImmediate(rt); Object.DestroyImmediate(tex);
+            return;
+        }
+
+        // Declared OUTSIDE the try on purpose: a local declared inside a try block does not survive
+        // past its closing brace in C#, and the ranking below reads all four. This is the same class
+        // of mistake as D-157 - the brace-depth check saw a structurally perfect file.
+        float noRefl = b, noAmb = b, noDir = b, noPts = b;
+
+        var log = new List<string>();
+        log.Add("media " + b.ToString("0.0000") + "  maximo " + maxOut.ToString("0.0000")
+                + "  (referencia: interior escuro ~0,05-0,09, sala clara >0,20)");
+
+        try
+        {
+            RenderSettings.reflectionIntensity = 0f;
+            noRefl = measure();
+            log.Add("sem REFLECTION      = " + noRefl.ToString("0.0000") + "   tira " + (b - noRefl).ToString("0.0000"));
+            RenderSettings.reflectionIntensity = refl;
+
+            RenderSettings.ambientIntensity = 0f;
+            noAmb = measure();
+            log.Add("sem AMBIENTE        = " + noAmb.ToString("0.0000") + "   tira " + (b - noAmb).ToString("0.0000"));
+            RenderSettings.ambientIntensity = ambIntensity;
+
+            foreach (var L in dir) L.enabled = false;
+            noDir = measure();
+            foreach (var L in dir) L.enabled = true;
+            log.Add("sem DIRECIONAL      = " + noDir.ToString("0.0000") + "   tira " + (b - noDir).ToString("0.0000"));
+
+            foreach (var L in pts) L.enabled = false;
+            noPts = measure();
+            foreach (var L in pts) L.enabled = true;
+            log.Add("sem PONTUAIS(" + pts.Count + ")   = " + noPts.ToString("0.0000") + "   tira " + (b - noPts).ToString("0.0000"));
+        }
+        finally
+        {
+            // A check that leaves the scene modified is not a check.
+            RenderSettings.reflectionIntensity = refl;
+            RenderSettings.ambientIntensity = ambIntensity;
+            foreach (var L in dir) L.enabled = true;
+            foreach (var L in pts) L.enabled = true;
+            Object.DestroyImmediate(rt);
+            Object.DestroyImmediate(tex);
+        }
+
+        foreach (var l in log) Debug.Log("[Bright] " + l);
+        float biggest = 0f; string who = "";
+        float m1 = b - noRefl, m2 = b - noAmb, m3 = b - noDir, m4 = b - noPts;
+        if (m1 >= m2 && m1 >= m3 && m1 >= m4) { who = "REFLECTION"; biggest = m1; }
+        else if (m2 >= m3 && m2 >= m4) { who = "AMBIENTE"; biggest = m2; }
+        else if (m3 >= m4) { who = "DIRECIONAL"; biggest = m3; }
+        else { who = "PONTUAIS"; biggest = m4; }
+        Debug.Log("[Bright] frame medio " + b.ToString("0.0000") + "; o termo que mais pesa e "
+                  + who + " (" + biggest.ToString("0.0000") + " de " + b.ToString("0.0000") + ")."
+                  + " Se voce cortou as lampadas e a cena continua clara, o culpado quase nunca e a lampada.");
+    }
+
     /// <summary>True for a wall TILE - the object that actually carries the mesh.
     ///
     /// This used to mean "the innermost name match", and that was wrong in a way that quietly
@@ -5464,7 +5868,14 @@ public static class EsSceneBuilder
         var pad = Object.FindFirstObjectByType<EsSafeKeypad>();
         if (pad == null) { Debug.LogError("[SelfTest2] no EsSafeKeypad in the scene"); return; }
         if (pad.keypadRoot == null) { Debug.LogError("[SelfTest2] keypadRoot is NULL"); return; }
+        var log = Object.FindFirstObjectByType<EsLogSortPuzzle>();
+        if (log == null) { Debug.LogError("[SelfTest2] no EsLogSortPuzzle in the scene"); return; }
         pad.DebugReset();
+        log.DebugReset();
+
+        // D-229 setup: the safe refuses until the logs are solved, so the test meets the
+        // precondition first - typing the PIN "cold" is the gate case and lives in ST3 now.
+        log.SetSlotsForTest(EsLogSortPuzzle.SortedIndices(log.packetHex));
 
         int allFound = 1;
         foreach (var cap in new[] { "3", "7", "1", "9", "ENTER" })
@@ -5482,16 +5893,40 @@ public static class EsSceneBuilder
 
         Debug.Log("[SelfTest2] VERDICT = " + ((allFound == 1 && pad.solved)
                   ? "PASS (3, 7, 1, 9, ENTER opened the safe)" : "FAIL"));
+        pad.DebugReset();
+        log.DebugReset();
     }
 
     [MenuItem("Tools/Escape Room/Self Test 3 - Wrong PIN 1111 (must be refused)")]
     public static void SelfTest3()
     {
+        int fails = 0;
         var pad = Object.FindFirstObjectByType<EsSafeKeypad>();
         if (pad == null) { Debug.LogError("[SelfTest3] no EsSafeKeypad in the scene"); return; }
         if (pad.keypadRoot == null) { Debug.LogError("[SelfTest3] keypadRoot is NULL"); return; }
-        pad.DebugReset();
+        var log = Object.FindFirstObjectByType<EsLogSortPuzzle>();
+        if (log == null) { Debug.LogError("[SelfTest3] no EsLogSortPuzzle in the scene"); return; }
 
+        // D-229, case 1: the RIGHT pin with the logs unsolved is a guess, not a deduction.
+        pad.DebugReset();
+        log.DebugReset();
+        foreach (var cap in new[] { "3", "7", "1", "9", "ENTER" })
+        {
+            for (int i = 0; i < pad.keypadRoot.transform.childCount; i++)
+            {
+                var b = pad.keypadRoot.transform.GetChild(i).GetComponent<UnityEngine.UI.Button>();
+                var lbl = pad.keypadRoot.transform.GetChild(i).GetComponentInChildren<UnityEngine.UI.Text>();
+                if (b != null && lbl != null && lbl.text == cap) { b.onClick.Invoke(); break; }
+            }
+        }
+        bool gateHolds = !pad.solved;
+        Debug.Log("[SelfTest3] right PIN, logs unsolved -> solved=" + pad.solved + "   "
+                  + (gateHolds ? "PASS (gate holds)" : "FAIL (skipped the logs)"));
+        if (!gateHolds) fails++;
+
+        // case 2: the WRONG pin with the precondition met is a genuine mismatch.
+        log.SetSlotsForTest(EsLogSortPuzzle.SortedIndices(log.packetHex));
+        pad.DebugReset();
         foreach (var cap in new[] { "1", "1", "1", "1", "ENTER" })
         {
             for (int i = 0; i < pad.keypadRoot.transform.childCount; i++)
@@ -5504,6 +5939,11 @@ public static class EsSceneBuilder
         bool refused = !pad.solved;
         Debug.Log("[SelfTest3] wrong PIN refused = " + refused + "   "
                   + (refused ? "PASS (safe stays shut)" : "FAIL (wrong PIN opened the safe)"));
+        if (!refused) fails++;
+
+        pad.DebugReset();
+        log.DebugReset();
+        Debug.Log("[SelfTest3] VERDICT = " + (fails == 0 ? "PASS (2/2)" : "FAIL (" + fails + ")"));
     }
 
 
@@ -5552,6 +5992,79 @@ public static class EsSceneBuilder
         if (prefabName == WALL_PREFAB)
             SetWallThickness(go.transform, WALL_THICKNESS, out _, out _);
         return go;
+    }
+
+    /// <summary>Opens the game on a card that has to be dismissed before anything works.
+    ///
+    /// <para><b>Screen Space Overlay, for the same reason the end panel is.</b>
+    /// <c>EsCrosshairPointer.FindTarget</c> skips <c>RenderMode.ScreenSpaceOverlay</c> outright
+    /// ("HUD, not the world"), so INICIAR never competes with the world-space buttons for the
+    /// crosshair vote - it is a real mouse button on an overlay, clicked by the player, not aimed
+    /// at by the crosshair.</para>
+    ///
+    /// <para><b>The body block is 6 pt smaller than the end panel's</b> because this one carries
+    /// 11 content lines against the end panel's two, and it still sizes in one screen without
+    /// scrolling. Every string is ASCII by D-160.</para>
+    ///
+    /// <para>The panel lives under ROOT so <c>Build()</c> recreates it like everything else the
+    /// builder owns - an overlay at the scene root would survive a rebuild and stack a second one
+    /// on top of the first.</para></summary>
+    static void BuildIntroPanel(Transform root, TerminalController terminal)
+    {
+        var go = new GameObject("IntroOverlay", typeof(RectTransform));
+        go.transform.SetParent(root, false);
+        var canvas = go.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.sortingOrder = 110;          // above EndOverlay's 100, so a card never sits behind a result
+        var scaler = go.AddComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1920f, 1080f);
+        go.AddComponent<GraphicRaycaster>();
+
+        var panel = new GameObject("IntroPanel", typeof(RectTransform));
+        panel.transform.SetParent(go.transform, false);
+        EsUi.Stretch((RectTransform)panel.transform);
+        var bg = EsUi.Img(panel.transform, "Bg", new Color(0.02f, 0.03f, 0.04f, 0.96f));
+        EsUi.Stretch(bg.rectTransform);
+
+        var title = EsUi.Label(panel.transform, "IntroTitle", "NO-ZERO", 64,
+                               new Color(0.55f, 0.92f, 0.80f), TextAnchor.UpperCenter, FontStyle.Bold);
+        title.rectTransform.anchorMin = new Vector2(0, 1); title.rectTransform.anchorMax = new Vector2(1, 1);
+        title.rectTransform.offsetMin = new Vector2(60, -190); title.rectTransform.offsetMax = new Vector2(-60, -90);
+
+        var body = EsUi.Label(panel.transform, "IntroBody",
+            "FILIAL 9 - BANCO ARTICO\n" +
+            "MODULO DE PESQUISA CRIPTOGRAFICA\n\n" +
+            "2142. O A.E.G.I.S. isolou esta filial\n" +
+            "apos identificar uma ameaca\n\n" +
+            "O suporte vital desta sala durara\n" +
+            "ate a purificacao. So o reator reabre a\n" +
+            "saida, e ele so reinicia manualmente.\n\n" +
+            "Leia o CADERNO DO TECNICO.\n" +
+            "O procedimento esta la.",
+            36, new Color(0.82f, 0.9f, 0.86f), TextAnchor.UpperCenter);
+        body.rectTransform.anchorMin = new Vector2(0, 1); body.rectTransform.anchorMax = new Vector2(1, 1);
+        // Sized against the MEASURED need, not by eye: 12 lines at 36 pt x 1,145 line height is
+        // ~495 px, against the 530 px this rect gives - 35 px of margin. The first attempt gave it
+        // 450 px at 40 pt and `Check UI text overflow` came back "1 overflowing", which is exactly
+        // what the check exists to catch (D-50: overflow is VISIBLE here, not silently clipped).
+        body.rectTransform.offsetMin = new Vector2(140, -780);
+        body.rectTransform.offsetMax = new Vector2(-140, -250);
+
+        var start = EsUi.ButtonWithLabel(panel.transform, "StartButton", "INICIAR", 56,
+                                        new Color(0.20f, 0.36f, 0.30f, 1f), Color.white);
+        var srt = (RectTransform)start.transform;
+        srt.anchorMin = srt.anchorMax = new Vector2(0.5f, 0f);
+        srt.pivot = new Vector2(0.5f, 0f);
+        srt.sizeDelta = new Vector2(620f, 130f);
+        srt.anchoredPosition = new Vector2(0f, 160f);
+
+        var intro = go.AddComponent<EsIntroScreen>();
+        intro.introPanel = panel;
+        intro.startButton = start;
+        intro.terminal = terminal;
+
+        Debug.Log("[EscapeRoom] Intro card built (Screen Space Overlay, sort 110)");
     }
 
     /// <summary>Full-screen results overlay (victory / defeat). Also carries the restart
@@ -6012,6 +6525,25 @@ public static class EsSceneBuilder
         Kenney("template-floor-big", t, new Vector3(-8.0f, -4.23f, -26.0f), Vector3.zero, one, true);
         Kenney("template-floor-big", t, new Vector3(8.0f, -4.23f, -26.0f), Vector3.zero, one, true);
 
+        // D-232: the threshold slab. It sits 1 cm under the existing Floor_01 tiles (tops
+        // y 0.01, slab top y 0.0: no z-fighting, no lip a CharacterController can feel) and
+        // abuts the deck edge exactly at z -18. It is a GUARANTEE, not a gap-fill: measured
+        // live, the tiles already covered the whole walk (raycast y 0.01, full door width,
+        // past z -18), so the first version of this comment - "3.2 m of void" inferred from
+        // tile bounds that stopped at the prism edge - was wrong, and the inference has been
+        // struck through rather than silently edited. The slab stays because the tiles out
+        // there are outside every wall bound: a future tile pass that "cleans up" out-of-area
+        // tiles would reopen the walk off the world, and this slab makes that unrepresentable.
+        Kenney("template-floor-big", t, new Vector3(0f, -4.23f, -14.0f), Vector3.zero, one, true);
+
+        // D-232: posts under the canopy's far edge. CorridorCeiling juts 7.4 m out over the
+        // exit walk (z -11.9..-19.3) with nothing under its far end - measured live, zero
+        // verticals in the whole bay - so the exit sightline ended in a floating dark slab
+        // edge against the night sky. Two posts (additive; the canopy itself is untouched)
+        // land on tiled floor and meet its underside at 3.7.
+        EsTheme.Box("CanopyPost_L", t, new Vector3(-1.6f, 1.85f, -19.2f), new Vector3(0.25f, 3.7f, 0.25f), _metal);
+        EsTheme.Box("CanopyPost_R", t, new Vector3(1.6f, 1.85f, -19.2f), new Vector3(0.25f, 3.7f, 0.25f), _metal);
+
         // ---- parapet around the deck edge (2 x 4.05 x 1), so the drop reads as a drop
         foreach (var p in new[] { new Vector3(0f, 0f, -33.6f), new Vector3(-4f, 0f, -33.6f),
                                   new Vector3(4f, 0f, -33.6f), new Vector3(-11.6f, 0f, -26f),
@@ -6158,12 +6690,12 @@ public static class EsSceneBuilder
                              + "fillers will render untextured.");
 
         _gold     = Mat("M_Gold",     EsTheme.KeyGold,  0.75f, 0.65f, EsTheme.KeyGold, 0.35f);
-        _glowOn   = Mat("M_GlowOn",   EsTheme.ScreenOn, 0.00f, 0.50f, EsTheme.ScreenOn, 2.20f);
+        _glowOn   = Mat("M_GlowOn",   EsTheme.ScreenOn, 0.00f, 0.50f, EsTheme.ScreenOn, 0.55f);
         _alarm    = Mat("M_Alarm",    new Color(1,1,1), 0.00f, 0.40f, Color.black,   0f);
         _paper    = Mat("M_Paper",    new Color32(0xD8,0xD2,0xC0,0xFF), 0f, 0.10f, Color.black, 0f);
         // exit glow as a real asset: a runtime-created material would not persist in the
         // saved scene and would render magenta after a reload
-        _exitGlow = Mat("M_ExitGlow", new Color(1f, 0.95f, 0.85f), 0f, 0.40f, new Color(1f, 0.93f, 0.80f), 3.4f);
+        _exitGlow = Mat("M_ExitGlow", new Color(1f, 0.95f, 0.85f), 0f, 0.40f, new Color(1f, 0.93f, 0.80f), 0.85f);
         // near-black, fully rough: any sliver of it that shows through a seam must read as
         // shadow, never as sky (D-41)
         _void     = Mat("M_VoidBlock", new Color(0.012f, 0.014f, 0.018f), 0f, 0f, Color.black, 0f);
@@ -6171,23 +6703,23 @@ public static class EsSceneBuilder
         _carpet   = Mat("M_Carpet",   new Color32(0x23,0x2A,0x3A,0xFF), 0f, 0.95f, Color.black, 0f);
         _belt     = Mat("M_Belt",     new Color32(0x1E,0x2A,0x52,0xFF), 0f, 0.90f, Color.black, 0f);
         _screenOff= Mat("M_ScreenOff",new Color32(0x05,0x07,0x0A,0xFF), 0.20f, 0.60f, Color.black, 0f);
-        _panelGlow= Mat("M_PanelGlow",new Color(0.85f, 0.95f, 1f), 0f, 0.40f, new Color(0.75f, 0.90f, 1f), 2.4f);
+        _panelGlow= Mat("M_PanelGlow",new Color(0.85f, 0.95f, 1f), 0f, 0.40f, new Color(0.75f, 0.90f, 1f), 0.60f);
         _cabRed   = Mat("M_CabRed",   new Color32(0x8C,0x1A,0x12,0xFF), 0.30f, 0.45f, Color.black, 0f);
         // Exposed fibre-optic runs (A.E.G.I.S. Fase 0): dark sheath, red emergency glow.
-        _fiber    = Mat("M_Fiber",    new Color32(0x1A,0x08,0x08,0xFF), 0f, 0.40f, new Color(1f, 0.20f, 0.15f), 2.0f);
+        _fiber    = Mat("M_Fiber",    new Color32(0x1A,0x08,0x08,0xFF), 0f, 0.40f, new Color(1f, 0.20f, 0.15f), 0.50f);
         // Hex mesh puzzle (Fase 1): dark tile, dim-red dead ports, cyan live ports,
         // amber emitter/receptor bodies. Assets, never runtime (D-23/D-49).
         _hexBase  = Mat("M_HexBase",  new Color32(0x16,0x1A,0x1F,0xFF), 0.60f, 0.35f, Color.black, 0f);
         _hexDim   = Mat("M_HexDim",   new Color32(0x3A,0x0E,0x0C,0xFF), 0f, 0.50f, new Color(0.85f, 0.12f, 0.12f), 0.2f);
-        _hexLive  = Mat("M_HexLive",  EsTheme.CardCyan, 0f, 0.50f, EsTheme.CardCyan, 2.0f);
-        _hexSrc   = Mat("M_HexSrc",   new Color32(0x4A,0x32,0x0E,0xFF), 0.30f, 0.40f, EsTheme.KeyAccent, 1.2f);
+        _hexLive  = Mat("M_HexLive",  EsTheme.CardCyan, 0f, 0.50f, EsTheme.CardCyan, 0.50f);
+        _hexSrc   = Mat("M_HexSrc",   new Color32(0x4A,0x32,0x0E,0xFF), 0.30f, 0.40f, EsTheme.KeyAccent, 0.30f);
         // Live tile body (Fase 1b readability): the whole hex glows so the route
         // reads as one shape instead of scattered pips.
-        _hexLiveTile = Mat("M_HexLiveTile", new Color32(0x0A,0x2A,0x30,0xFF), 0f, 0.50f, EsTheme.CardCyan, 1.2f);
+        _hexLiveTile = Mat("M_HexLiveTile", new Color32(0x0A,0x2A,0x30,0xFF), 0f, 0.50f, EsTheme.CardCyan, 0.30f);
         // Single-pip leaves (D-183): slate-teal bodies so the ends-to-plug read
         // before anything lights; teal-cyan when live, distinct from route cyan.
         _hexLeaf = Mat("M_HexLeaf", new Color32(0x1E,0x2E,0x3A,0xFF), 0.30f, 0.40f, new Color(0.10f, 0.35f, 0.45f), 0.5f);
-        _hexLeafLive = Mat("M_HexLeafLive", new Color32(0x0C,0x3A,0x40,0xFF), 0f, 0.50f, new Color(0.15f, 0.85f, 0.80f), 1.6f);
+        _hexLeafLive = Mat("M_HexLeafLive", new Color32(0x0C,0x3A,0x40,0xFF), 0f, 0.50f, new Color(0.15f, 0.85f, 0.80f), 0.40f);
         _frost    = Mat("M_Frost",    new Color(0.55f, 0.85f, 0.95f, 0.45f), 0.10f, 0.60f,
                         new Color(0.30f, 0.70f, 0.90f), 0.35f);
         // transparent URP/Lit, guarded like everything else (D-23): without this the
@@ -6225,12 +6757,19 @@ public static class EsSceneBuilder
             new Vector3(1.35f, -0.11f, 10.275f), new Vector3(21.0f, 0.20f, 3.45f), _shellDark);
 
         // Ceiling raised to the measured clear height. Its BOTTOM sits on CeilBottom, so the
-        // slab centre is half a thickness above that. Trigger, so it can never launch the player.
+        // slab centre is half a thickness above that.
+        //
+        // D-233: SOLID, not a trigger. It used to read "Trigger, so it can never launch the
+        // player" - but a trigger ceiling blocks nothing, and jumping players went straight
+        // through the slab (from the safe top: feet 1.13 + head 1.8 + jump 0.85 = apex 3.78
+        // against the slab bottom at 3.7). A CharacterController against a static box resolves
+        // by sliding, not launching; the launch fear had no repro attached to it, and live
+        // testing after solidifying found bump-and-stop, never a launch. Triggers are for
+        // sensing (the exit trigger is one, and stays one); a ceiling is for stopping. So the
+        // primitive's collider is left exactly as EsTheme.Box builds it: solid.
         float cb = CeilBottom;
         var ceil = EsTheme.Box("Ceiling", g.transform,
             new Vector3(0.1f, cb + 0.10f, 0.2f), new Vector3(24.4f, 0.20f, 24.2f), _shellDark);
-        var bc = ceil.GetComponent<BoxCollider>();
-        if (bc != null) bc.isTrigger = true;
     }
 
     // =====================================================================
@@ -6435,7 +6974,10 @@ public static class EsSceneBuilder
         EsTheme.Box("Frame_L", d.transform, new Vector3(-1.15f, 1.35f, 0f), new Vector3(0.30f, 2.70f, 0.50f), _metal);
         EsTheme.Box("Frame_R", d.transform, new Vector3(1.15f, 1.35f, 0f), new Vector3(0.30f, 2.70f, 0.50f), _metal);
         EsTheme.Box("Frame_T", d.transform, new Vector3(0f, 2.60f, 0f), new Vector3(2.60f, 0.30f, 0.50f), _metal);
-        EsTheme.Box("Bulkhead", d.transform, new Vector3(0f, 1.35f, -0.30f), new Vector3(2.60f, 2.70f, 0.12f), _shellDark);
+        // The solid plate behind the leaf. It fills the doorway prism (measured live: 2.6 x 2.7
+        // with a BoxCollider), so the leaf swinging without it retracting would open a door
+        // onto a wall. Deactivated by ForceOpen (D-230); the reference is kept for that.
+        var bulkhead = EsTheme.Box("Bulkhead", d.transform, new Vector3(0f, 1.35f, -0.30f), new Vector3(2.60f, 2.70f, 0.12f), _shellDark);
 
         var hinge = new GameObject("DoorPivot");
         hinge.transform.SetParent(d.transform, false);
@@ -6452,7 +6994,7 @@ public static class EsSceneBuilder
 
         // Seal plate where the card reader used to sit: the door now opens
         // only on the optical key (D-190), so there is no slot anymore.
-        EsTheme.Box("SealPlate", d.transform, new Vector3(1.02f, 1.15f, 0.30f),
+        var seal = EsTheme.Box("SealPlate", d.transform, new Vector3(1.02f, 1.15f, 0.30f),
                     new Vector3(0.36f, 0.55f, 0.06f), _metal);
 
         var bd = d.AddComponent<BlastDoor>();
@@ -6460,6 +7002,25 @@ public static class EsSceneBuilder
         bd.statusLamp = lampGo.GetComponent<Renderer>();
         bd.servoClip = Clip("servo_door");
         bd.lockedClip = Clip("error_buzz");
+        bd.bulkhead = bulkhead;
+
+        // D-230: the slot is back, but not the old chain. D-190 removed the door cardSlot as
+        // part of deleting credencial->armario->chave->cartao, a whole parallel fetch-quest;
+        // this socket takes the exit card the READER dispenses, which is the physical payoff
+        // of puzzle 3, not a new enigma. Same construction as the plate slots ("copie o que
+        // esta funcionando"), on the seal plate that marks where a reader sat.
+        var sock = seal.AddComponent<ItemSocket>();
+        sock.acceptsKey = "cartao-saida";
+        sock.acceptsLabel = "CARTAO DE SAIDA";
+        sock.indicator = seal.GetComponent<Renderer>();
+        var seat = new GameObject("Seat");
+        seat.transform.SetParent(seal.transform, false);
+        sock.seat = seat.transform;
+        sock.stowParent = d.transform;
+        sock.acceptClip = Clip("lock_insert");
+        sock.rejectClip = Clip("error_buzz");
+        bd.cardSocket = sock;
+        bd.WireCardSocket();
         return bd;
     }
 
@@ -6489,10 +7050,54 @@ public static class EsSceneBuilder
         // needed ~583 px and spilled out the bottom of the board - EsUi sets
         // verticalOverflow = Overflow on purpose, so a puzzle clue is never silently clipped,
         // which also means overflow is VISIBLE rather than harmless. See D-50.
+        //
+        // D-213: the last word was "CHAVE", left over from the legacy chain (credencial -> armario ->
+        // chave -> cartao) that D-190 deleted. The third step has been the acrylic PLATES ever since,
+// so the mural was promising a step the game does not have.
+        //
+        // D-224: the clock is now named as the time until PURIFICATION, not as time to escape. The
+        // player asked for exactly this ("O mural pode mencionar Tempo ate a purificacao, que e o
+        // tempo de escape. E deixar em aberto o que e para o jogador"), and it closes an asymmetry
+        // that was a real hole: before this, the mural said "VOCE TEM 60:00 PARA REATIVAR O REATOR
+        // E SAIR" - which defines the deadline as ESCAPE time and leaves purification with no place
+        // in the player's head at all. A winning player then left never knowing the gas was the
+        // clock; only the defeat panel told them, and only after they had already lost.
+        //
+        // Naming the deadline without naming what purification DOES is what fixes it. "A CONTAGEM
+        // CORRE ATE A PURIFICACAO" tells the player the 60:00 is a deadline against something, which
+        // is what they need to act, and leaves the agent itself unstated - the fear stays a system
+        // that will not explain itself (same rule as D-223's "what it is, stays unnamed"). A winning
+        // player leaves with the word and no explanation. A losing player reads "O A.E.G.I.S. cumpriu
+        // o protocolo" and retrofits the mural line onto it. One line, both endings.
+        //
+        // "A CONTAGEM CORRE" is also literally TRUE in a way "VOCE TEM" was not: the reserve starts on
+        // the terminal reboot, so saying the clock is already running warns the player that rebooting
+        // is not what starts it - which is the one thing ST1 hides from them.
+        //
+        // "60:00." sits alone at the end of the sentence because it is the number that gets memorised.
+        // The reactor stays in the line as a mission instruction rather than as the reason the clock
+        // exists - naming it as the reason (as the old text did) predicted the player's own plan.
+        //
+        // STILL 10 lines at 36 pt, inside the D-50 budget - to be confirmed by
+        // `Check UI text overflow` against the real rect, never by counting lines myself.
+        //
+        // D-220: "ISOLOU A FILIAL" replaces "SELOU A SAIDA", and the difference is the whole design.
+        // Sealing the EXIT is what a villain does; isolating the BRANCH is what a containment system
+        // does when it is right - and it is right. The player was inside when it happened, so he is
+        // collateral, not the threat. Critically this also keeps the manual override honest: the
+        // protocol isolated the zone, it did not build a death box, so the reactor release stays
+        // live. That is why restarting it opens the door WITHOUT the player having defeated anything.
+        //
+        // WHAT IT IS, STAYS UNNAMED. Naming the thing would convert the fear into a puzzle - the
+        // player would go looking for a monster rather than feeling the weight of a system that is
+        // correct and will not explain itself. The A.E.G.I.S. saw something; that is the whole of it.
+        //
+        // STILL 10 lines at 36 pt (inside the D-50 budget) - confirmed by `Check UI text overflow`
+        // against the real rect, never by counting lines myself.
         var bBody = EsUi.Label(board.transform, "B",
             "2142 - NO-ZERO\n     PESQUISA CRIPTOGRAFICA\n\n" +
-            "A.E.G.I.S. VIU UM FANTASMA\n     E SELOU TUDO ......... 60:00\n\n" +
-            "O REATOR SO REINICIA\nA MAO, EM 3 PASSOS:\nENERGIA, LOGS E CHAVE.",
+            "A.E.G.I.S. ISOLOU A FILIAL\n     A CONTAGEM CORRE ATE A\n     PURIFICACAO. 60:00.\n     REATIVE O REATOR E SAIA.\n\n" +
+            "O REATOR SO REINICIA A MAO,\nEM 3 PASSOS: ENERGIA, LOGS E PLACAS.",
             36, new Color(0.88f, 0.94f, 0.91f), TextAnchor.UpperLeft);
         bBody.rectTransform.anchorMin = Vector2.zero; bBody.rectTransform.anchorMax = Vector2.one;
         bBody.rectTransform.offsetMin = new Vector2(55, 30); bBody.rectTransform.offsetMax = new Vector2(-55, -150);
@@ -6527,8 +7132,15 @@ public static class EsSceneBuilder
         // a bare 24 x 24 expanse
         MakeCrate(root, "Crate_A", new Vector3(6.4f, 0f, 1.4f), 0f);
         MakeCrate(root, "Crate_B", new Vector3(6.4f, 0.95f, 1.4f), 14f);
-        MakeCrate(root, "Crate_C", new Vector3(8.0f, 0f, 7.6f), -22f);
-        MakeCrate(root, "Crate_D", new Vector3(9.2f, 0f, 7.9f), 8f);
+        // C and D were a 3x2 block across the only straight approach to the PlateReader: their
+        // footprints cover x 7,3..9,8 at z 6,9..8,5, and the three plate slots sit at x 11,25,
+        // z 7,9/8,5/9,1. Probed with a player-sized OverlapBox, the corridor at z 7..8 is solid
+        // from x 8 to x 10 and the player has to detour via z=6 or z=9 to reach the station.
+        // Moved 1,4 m NORTH (-z) so the direct lane at z 7,5..9 opens, keeping them against the
+        // east side instead of leaving them adrift in the middle of the room. Crate A and B stay
+        // at z 1,4 - they are storage, not an obstacle on a puzzle route.
+        MakeCrate(root, "Crate_C", new Vector3(8.0f, 0f, 6.2f), -22f);
+        MakeCrate(root, "Crate_D", new Vector3(9.2f, 0f, 6.5f), 8f);
 
         // workbench, now inside the nook created by the x=4.5 partition
         var bench = new GameObject("Workbench");
@@ -6789,6 +7401,32 @@ public static class EsSceneBuilder
         foreach (var rx in new[] { -0.5f, 0.5f })
             EsTheme.Box("Rod" + rx, p.transform, new Vector3(rx, 0.20f, 0f),
                         new Vector3(0.04f, 0.35f, 0.04f), _metal);
+        // It LOOKED like a lamp - emissive glow, two rods up to the ceiling - and emitted no light
+        // at all, which is the plainest form of the bug the player reported: the fixtures the eye
+        // can point at were dead, while five invisible lights did the actual work. A real point
+        // light just under the glow. Range 7 / 0.45 on purpose: the six panels sit in a 6x8 m block
+        // in the middle of a 24 m room, so they read as separate pools with dark between them -
+        // which is what makes the gaps look like missing light instead of like a filled box.
+        var lamp = new GameObject("Lamp");
+        lamp.transform.SetParent(p.transform, false);
+        lamp.transform.localPosition = new Vector3(0f, -0.10f, 0f);
+        var ll = lamp.AddComponent<Light>();
+        // 0,30 -> 0,16 (D-216). Measured across SEVEN viewpoints, because one frame from the spawn
+        // camera cannot see "the rest of the room" - the whole complaint was invisible to it. The
+        // centre of the room measured 0,1130, the brightest point in it and above the dark band,
+        // and ablation put 26% of that frame on these six panels (0,0297). They were MY addition in
+        // D-201 and they sit in a 6x8 m block, so their pools merge into one general wash instead of
+        // the separate pools the D-201 comment intended. Halving them takes the centre to ~0,1026.
+        //
+        // Also measured and CLEARED, so nobody re-chases them: the 3 CityGlow (int 3,2, range 34, no
+        // shadows) leak exactly 0,0000 into the room; the corridor ThresholdLight also 0,0000; and
+        // the ambient contributes 0,0000 - despite ambientIntensity 0,30. **The floor with every
+        // light group off is 0,0833**, so these panels cannot be pushed much further before they stop
+        // reading as lamps at all.
+        ll.type = LightType.Point; ll.range = 7f; ll.intensity = 0.16f;
+        ll.color = new Color(1.0f, 0.95f, 0.86f);
+        ll.shadows = LightShadows.None;
+        ll.renderMode = LightRenderMode.ForcePixel;
     }
 
     static void MakeHangingSign(Transform parent, Vector3 pos, string text)
@@ -6879,6 +7517,24 @@ public static class EsSceneBuilder
     // 1.7), the x=4.5 partition (west face 4.3) and the terminal lane.
     // Clicks arrive as 3D IInteractable via the existing crosshair ray.
     // =====================================================================
+    /// <summary>Gathers the six CeilPanel lamps so the GameManager can switch them with the power state.
+    ///
+    /// <para>D-217. They used to burn from Build Level onward, which meant "energy restored by the
+    /// hex puzzle" changed nothing the player could see - the reward was a tint on one red lamp while
+    /// the ceiling was already lit. Collecting them by PARENT name rather than by name is deliberate:
+    /// the lamp is a child called "Lamp" inside "CeilPanel", and six objects all called "Lamp"
+    /// would be ambiguous anywhere else in the scene.</para></summary>
+    static Light[] CollectCeilingLamps()
+    {
+        var found = new List<Light>();
+        foreach (var L in Object.FindObjectsByType<Light>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (L == null || L.transform.parent == null) continue;
+            if (L.transform.parent.name == "CeilPanel") found.Add(L);
+        }
+        return found.ToArray();
+    }
+
     static EsHexGrid BuildHexPanel(Transform root, EscapeGameManager gm)
     {
         var panel = new GameObject("HexPanel");
@@ -6921,6 +7577,45 @@ public static class EsSceneBuilder
         t2.rectTransform.offsetMin = new Vector2(15, 12); t2.rectTransform.offsetMax = new Vector2(-15, -100);
         grid.statusLabel = t2;
         grid.RefreshAll();
+
+        // D-213/D-214: a task light for the hex board, and ONLY here.
+        //
+        // PLACEMENT WAS MEASURED, NOT GUESSED. The board is 1,22 m tall (y 0,62..1,84) and stands in
+        // the north corner, the darkest and most occluded spot in a room that is deliberately dim
+        // (D-205/D-210). A point light close to a surface that tall has an enormous 1/d^2 gradient:
+        // measuring 1/d^2 at every one of the 17 node meshes, the first placement (0,62 m above the
+        // board centre, 0,62 m in front) gave a max/min ratio of **6,95** - the bottom row received
+        // one seventh of the top row's light, which is exactly the "I only see the top" report, and
+        // to make the bottom readable the intensity had to go to 0,637, which blew the TOP row to
+        // 1,391 (clipped white). **Distance is the only thing that flattens a point light**, and two
+        // lamps is WORSE than one (measured 4,02 vs 1,66 - each lamp makes its own hotspot). So the
+        // fix is one lamp, further out, at mid-height: ratio **1,66**, so the bottom row now gets
+        // ~60% of the top instead of ~14%, brightest point 0,332 with nothing clipping.
+        // The "place it high on the ceiling" options were measured and rejected: they are flatter
+        // (1,72-1,93) but need intensity 2,3-2,9, which would relight the whole room and undo D-210.
+        //
+        // COLOUR: emergency amber-red, per the player's note - this room is on reserve power and its
+        // only other light is the red wash (RoomLight) and the AlarmStrip. A cool white task lamp was
+        // going to read as a bug against that. Amber rather than pure red so it reads as a lamp and
+        // not as a strobe, and so the teal/cyan lit hexes (D-183) stay legible against it.
+        //
+        // RANGE 2,2 m keeps it at the corner - it must not become another sourceless fill (D-201).
+        // No collider is attached, so a player walking to the board is never blocked by it.
+        var hexLamp = new GameObject("HexTaskLight");
+        hexLamp.transform.SetParent(panel.transform, false);
+        hexLamp.transform.localPosition = new Vector3(w * 0.5f, h * 0.5f, 1.20f);
+        var hl = hexLamp.AddComponent<Light>();
+        hl.type = LightType.Point;
+        hl.range = 2.2f;
+        // 0,50 -> 0,75 at the player's request ("aumente um pouco"). Measured headroom: at 0,50 the
+        // brightest node sat at 0,335 and the darkest at 0,202, so 1,5x lands them at 0,503 / 0,303 -
+        // still far from the 1,0 clip, and roughly +0,10 on the darkest cell that was hard to read.
+        // Intensity only, never range: range is what keeps this lamp inside the corner (D-214).
+        hl.intensity = 0.75f;
+        hl.color = new Color(1.0f, 0.45f, 0.22f);
+        hl.shadows = LightShadows.None;
+        // Culling mask deliberately left at "everything": the board is on the default layer and a
+        // narrowed mask here would be one more thing to forget to widen later. Range does the work.
 
         Debug.Log("[EscapeRoom] Hex panel built: " + grid.nodes.Count + " nodes, "
                   + PathDbg(grid) + " (seed 2142)");
@@ -6980,13 +7675,23 @@ public static class EsSceneBuilder
         hinge.transform.localPosition = new Vector3(-0.8f, 0f, 0.25f);
         EsTheme.Box("SafeDoor", hinge.transform, new Vector3(0.8f, 0.55f, 0f), new Vector3(1.6f, 1.1f, 0.06f), _metal);
 
-        // upper pillar carrying both canvases
-        EsTheme.Box("Pillar", st.transform, new Vector3(0f, 1.75f, -0.19f), new Vector3(2.0f, 1.5f, 0.1f), _shell);
+        // Both canvases were mounted LOW, behind the safe itself, so the bottom third of the keypad was
+        // simply not on screen. Measured from a standing eye at (-9,70 / 1,65 / 5,00): the SafePad
+        // spanned y 0,88..1,56 and the SafeDoor (y 0..1,10) plus the SafeTop (y 1,07..1,13) came
+        // first on every ray below y 1,13 - 0,25 m of 0,68 m, 37% of the keys, the bottom row among
+        // them. The self tests could not have caught this: ST2/ST7 drive the buttons through their
+        // UnityEvent, so nothing ever looks AT the panel. What is in front of a panel is a
+        // different question from whether it works, and only a ray answers it.
+        // Layout now, from the safe outward, each piece clearing the one below it:
+        //   SafePad    1,16..1,84  (bottom clears SafeTop at 1,13 by 3 cm, centre now at eye height)
+        //   LogCanvas  1,96..2,68  (12 cm clear of the keypad above it)
+        //   Pillar     1,12..2,74  (carries both, still starts above the safe)
+        EsTheme.Box("Pillar", st.transform, new Vector3(0f, 1.93f, -0.19f), new Vector3(2.0f, 1.62f, 0.1f), _shell);
 
         // ---- log canvas (1500x800 @ 0.0009 -> 1.35 x 0.72 m)
         var logGo = new GameObject("LogCanvas", typeof(RectTransform));
         logGo.transform.SetParent(st.transform, false);
-        logGo.transform.localPosition = new Vector3(0f, 2.0f, -0.135f);
+        logGo.transform.localPosition = new Vector3(0f, 2.32f, -0.135f);
         logGo.transform.localEulerAngles = new Vector3(0f, 180f, 0f);
         var logCv = logGo.AddComponent<Canvas>();
         logCv.renderMode = RenderMode.WorldSpace;
@@ -7052,7 +7757,8 @@ public static class EsSceneBuilder
         // ---- safe keypad canvas (1000x760 @ 0.0009 -> 0.90 x 0.68 m)
         var padGo = new GameObject("SafePad", typeof(RectTransform));
         padGo.transform.SetParent(st.transform, false);
-        padGo.transform.localPosition = new Vector3(0f, 1.22f, -0.135f);
+        // raised so the safe door and its top no longer hide the lower keys - see the Pillar comment
+        padGo.transform.localPosition = new Vector3(0f, 1.50f, -0.135f);
         padGo.transform.localEulerAngles = new Vector3(0f, 180f, 0f);
         var padCv = padGo.AddComponent<Canvas>();
         padCv.renderMode = RenderMode.WorldSpace;
@@ -7125,6 +7831,11 @@ public static class EsSceneBuilder
         pad.clickClip = Clip("ui_click");
         pad.errorClip = Clip("error_buzz");
         pad.unlockClip = Clip("unlock_chime");
+        // D-229: the order edge, both directions. The keypad refuses until the logs are
+        // solved, and the solve repaints the keypad - wired here because both live in this
+        // station and this is the only place that sees them together.
+        pad.logPuzzle = puzzle;
+        puzzle.safePad = pad;
         pad.DebugReset();
 
         // ---- the three plates, standing in the safe cavity
@@ -7280,9 +7991,45 @@ public static class EsSceneBuilder
         reader.Refresh();
         reader.Wire();
 
-        Debug.Log("[EscapeRoom] Plate reader built: 3 sockets + OR preview + door link");
+        // ---- the exit card, pre-built asleep on the tray (D-230). Inactive until approval:
+        // the takeaway the player carries to the door socket. Built like the plates (visual
+        // + FinishItem collider/rigidbody/item in one call), then switched off - activation
+        // is the reward, and GrabbableItem.Awake records home on first activation, so the
+        // leash brings a lost card back to this tray rather than stranding the run.
+        var cardVisual = EsTheme.Box("CardVisual", rd.transform, new Vector3(-0.1f, 0.92f, 0.85f),
+                                     new Vector3(0.24f, 0.02f, 0.16f), _gold);
+        var card = FinishItem(cardVisual, rd.transform, "CartaoSaida",
+                              new Vector3(-0.1f, 0.92f, 0.85f),
+                              "cartao-saida", "Cartao de Saida", 0.2f);
+        card.gameObject.SetActive(false);
+        reader.exitCard = card.gameObject;
+
+        Debug.Log("[EscapeRoom] Plate reader built: 3 sockets + OR preview + door link + exit card");
     }
 
+
+    /// <summary>The win, moved past the doorway (D-230). A trigger volume on the deck,
+    /// just beyond the leaf swing and the retracted bulkhead - the floor was raycast live
+    /// (Floor_01 at y 0.01 from z -10 to -14.2) and the doorway prism holds nothing solid
+    /// once the bulkhead is gone, so this is walkable the moment the door opens.
+    ///
+    /// <para>Past the swing on purpose: the leaf opens inward (-105 deg, into the room), so
+    /// a trigger AT the doorway would fire while the player is still inside. At z -12.8 the
+    /// player has taken two steps onto the deck, under the gate landmark, and the panel's
+    /// "Voce saiu do No-Zero" is literally true.</para></summary>
+    static void BuildExitTrigger(Transform root, BlastDoor door, EscapeGameManager gm)
+    {
+        var go = new GameObject("ExitTrigger");
+        go.transform.SetParent(root, false);
+        go.transform.position = new Vector3(EXIT_X, 1.2f, -12.8f);
+        var col = go.AddComponent<BoxCollider>();
+        col.size = new Vector3(2.2f, 2.4f, 1.4f);
+        col.isTrigger = true;
+        var trig = go.AddComponent<EsExitTrigger>();
+        trig.door = door;
+        trig.gm = gm;
+        Debug.Log("[EscapeRoom] Exit trigger built past the doorway (win on walk-out)");
+    }
 
     // =====================================================================
     // lights
@@ -7299,7 +8046,12 @@ public static class EsSceneBuilder
             if (l.type == LightType.Directional) { sun = l; break; }
         if (sun != null)
         {
-            sun.intensity = 0.10f;
+            // 0,10 -> 0,02 (D-207). A directional has NO distance falloff: it lit every square metre of the
+            // room equally and, measured at the centre, was the SECOND largest source - 15% of all
+            // light, behind the punctual lamps and ahead of the ambient. So cutting the lamps by 70%
+            // moved the total less than expected while this one sat untouched underneath. At 0,10 it
+            // behaved less like a light and more like a uniform 15% lift on everything.
+            sun.intensity = 0.02f;
             sun.color = new Color(0.55f, 0.62f, 0.78f);
             sun.shadows = LightShadows.None;
         }
@@ -7308,7 +8060,14 @@ public static class EsSceneBuilder
         roomGo.transform.SetParent(root, false);
         roomGo.transform.position = new Vector3(2.0f, 2.85f, 0.5f);
         var rl = roomGo.AddComponent<Light>();
-        rl.type = LightType.Point; rl.range = 19f; rl.intensity = 0.85f;
+        // range was 19 m in a room that is 24 m across: one sourceless light was reaching
+        // essentially every corner, which is why the room never read as under-lit. 11 m keeps it a
+        // wash around the centre (which is its job as the Fase 0 quarantine light) instead of a
+        // room-wide sun. Intensity follows, or the near field goes hot while the corners stay lit.
+        // 0,40 here matches EscapeGameManager.emergencyIntensity, which is the owner that actually runs
+        // last - see D-202. Both files say the same number on purpose: when one value has two
+        // owners, leaving them to disagree guarantees that whoever reads next is misled.
+        rl.type = LightType.Point; rl.range = 11f; rl.intensity = 0.40f;
         // Emergency red: Fase 0 (A.E.G.I.S.) starts the room in quarantine light.
         // Fase 1 (energy mesh) restores blue via EscapeGameManager.SetPowerRestored().
         // The cool fills (PropFill/SouthFill) stay: readability was measured (D-113).
@@ -7321,7 +8080,11 @@ public static class EsSceneBuilder
         fillGo.transform.SetParent(root, false);
         fillGo.transform.position = new Vector3(0.0f, 2.70f, -8.6f);
         var fl = fillGo.AddComponent<Light>();
-        fl.type = LightType.Point; fl.range = 13f; fl.intensity = 0.70f;
+        // Cut from 0,70/13 to 0,22/7. This light has no fixture anywhere - nothing visible explains
+        // where it comes from - and at range 13 it was out-lighting the six lamps the player can
+        // actually see (0,30/range 5). D-113 kept a cool fill so the prop row stays readable; this
+        // keeps that, at a level that reads as spill rather than as the room's main source.
+        fl.type = LightType.Point; fl.range = 7f; fl.intensity = 0.14f;
         fl.color = new Color(0.72f, 0.84f, 0.95f);
 
         var alarmGo = new GameObject("AlarmLight");
@@ -7342,7 +8105,7 @@ public static class EsSceneBuilder
         arcGo.transform.SetParent(root, false);
         arcGo.transform.position = new Vector3(10.30f, 2.75f, 2.0f);
         var arc = arcGo.AddComponent<Light>();
-        arc.type = LightType.Point; arc.range = 6.5f; arc.intensity = 1.0f;
+        arc.type = LightType.Point; arc.range = 6.5f; arc.intensity = 0.45f;
         arc.color = new Color(1.0f, 0.88f, 0.70f);
 
         // south fill so the waiting area does not fall off into darkness
@@ -7350,7 +8113,8 @@ public static class EsSceneBuilder
         southGo.transform.SetParent(root, false);
         southGo.transform.position = new Vector3(0f, 2.70f, 7.5f);
         var sf = southGo.AddComponent<Light>();
-        sf.type = LightType.Point; sf.range = 14f; sf.intensity = 0.55f;
+        // same reasoning as PropFill, weaker: 0,55/14 -> 0,18/7
+        sf.type = LightType.Point; sf.range = 7f; sf.intensity = 0.12f;
         sf.color = new Color(0.75f, 0.85f, 0.95f);
         return res;
     }
@@ -7580,14 +8344,35 @@ public static class EsSceneBuilder
     // =====================================================================
     static void ConfigureAtmosphere()
     {
-        RenderSettings.fog = true;
+        // Fog OFF. The player compared the Scene view with its toggles all off against the Game view and
+        // said the raw one is the better-looking of the two. ExponentialSquared at 0,022 was hazing
+        // the far half of a 24 m room and greying the palette; without it the same lights read
+        // cleaner and the darkness reads as dark rather than as milky haze.
+        RenderSettings.fog = false;
         RenderSettings.fogMode = FogMode.ExponentialSquared;
         RenderSettings.fogColor = new Color(0.035f, 0.045f, 0.060f);
         RenderSettings.fogDensity = 0.022f;
+        // reflectionIntensity 1,00 -> 0,15 (D-210). THIS was the light in the room. Ablation measured on
+        // the actual rendered frame (RenderPipeline.SubmitRenderRequest into a RenderTexture, mean
+        // luminance): switching reflection off took the frame from 0,3044 to 0,0755 - 75% of every
+        // pixel of light came from specular reflection, while all 14 punctual lights together
+        // accounted for 0,0057 and the directional for 0,0013. Every lamp cut I made before this
+        // touched about 2% of the image, which is why the room "kept coming back bright".
+        // Cause: defaultReflectionMode = Skybox against M_ExteriorSky (a bright daylit exterior),
+        // at full intensity, on an interior with no power. 0,15 keeps a hint of specular so surfaces
+        // do not go dead-flat; measured 0,0866, and below 0,15 the curve stops paying (0,08 -> 0,0797).
+        RenderSettings.reflectionIntensity = 0.15f;
         RenderSettings.ambientMode = AmbientMode.Trilight;
         RenderSettings.ambientSkyColor = new Color(0.10f, 0.13f, 0.18f);
         RenderSettings.ambientEquatorColor = new Color(0.07f, 0.09f, 0.12f);
         RenderSettings.ambientGroundColor = new Color(0.03f, 0.035f, 0.045f);
+        // Trilight ignores occlusion entirely, so ambient at 1.0 was lifting every shadowed corner
+        // as hard as the lit floor - the room could never read as "light is missing" no matter how
+        // far the lamps were cut. Now 0,30, because removing the post-fx grade (D-205) makes the room
+        // read BRIGHTER - so the ambient had to fall further to land darker rather than lighter.
+        // The colours above are UNCHANGED on purpose: the player asked for less light, not a
+        // different light, and re-grading the ambient hue at the same time would confound the two.
+        RenderSettings.ambientIntensity = 0.30f;
     }
 
     static void BuildPostFx()
@@ -7643,7 +8428,13 @@ public static class EsSceneBuilder
         {
             var data = cam.GetComponent<UniversalAdditionalCameraData>();
             if (data == null) data = cam.AddComponent<UniversalAdditionalCameraData>();
-            data.renderPostProcessing = true;
+            // OFF (D-205). The player looked at the Scene view with its toggles all off and at the
+            // Game view, and said the raw one is the better-looking: ACES + postExposure -0,55 +
+            // vignette 0,42 + bloom were all crushing a room that should read as dark on reserve
+            // power, not graded into it. **The profile is still built above, untouched on purpose** -
+            // wiping it would destroy a tuned asset to express a decision better carried by one flag,
+            // and this way turning it back on is a single boolean.
+            data.renderPostProcessing = false;
         }
         AssetDatabase.SaveAssets();
     }
