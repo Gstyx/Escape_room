@@ -117,6 +117,19 @@ namespace EscapeRoom
             return res;
         }
 
+        /// <summary>D-235: does this plate, at its current rotation, block only cells the
+        /// template blocks? With the shipped plates exactly one rotation of each fits, so
+        /// "all three fit" is the solution - and it can be shown per plate, which turns one
+        /// 64-way guess into three independent "turn until green" steps.</summary>
+        public bool PlateFits(EsAcrylicPlate p)
+        {
+            if (p == null) return false;
+            for (int r = 0; r < 4; r++)
+                for (int c = 0; c < 4; c++)
+                    if (p.Rotated(r, c) == 1 && templateCells[r * 4 + c] == 0) return false;
+            return true;
+        }
+
         public bool IsMatch()
         {
             var cur = CurrentOr();
@@ -168,6 +181,18 @@ namespace EscapeRoom
                 else if (cur[i] == 0) img.color = new Color(0.29f, 0.78f, 0.91f, 1f);
                 else img.color = new Color(0.05f, 0.06f, 0.08f, 1f);
             }
+            // D-235: per-slot verdict on the GIRAR label (the text, not the button image -
+            // EsHoverHighlight owns the image colour and would restore a stale one on un-hover).
+            for (int i = 0; i < rotateButtons.Length; i++)
+            {
+                var b = rotateButtons[i];
+                var lbl = b != null ? b.GetComponentInChildren<Text>() : null;
+                if (lbl == null) continue;
+                var p = SeatedPlate(i);
+                if (p == null) { lbl.text = "GIRAR " + (i + 1); lbl.color = EsTheme.ScreenOn; }
+                else if (approved || PlateFits(p)) { lbl.text = "PLACA " + (i + 1) + " OK"; lbl.color = new Color(0.35f, 1f, 0.45f, 1f); }
+                else { lbl.text = "GIRAR " + (i + 1); lbl.color = new Color(1f, 0.35f, 0.30f, 1f); }
+            }
             if (statusLabel != null && !approved)
             {
                 int n = 0;
@@ -180,7 +205,7 @@ namespace EscapeRoom
                 }
                 else
                 {
-                    statusLabel.text = "GIRE AS PLACAS ATE REVELAR O DIGITO 4";
+                    statusLabel.text = "GIRE CADA PLACA ATE O BOTAO FICAR VERDE";
                     statusLabel.color = EsTheme.Amber;
                 }
             }

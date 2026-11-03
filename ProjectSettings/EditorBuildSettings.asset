@@ -6,8 +6,13 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/trabalho_marqueto.unity
+    guid: f0bf059ed4401e84ca13e59067558c1c
+  - enabled: 1
     path: Assets/Scenes/SampleScene.unity
     guid: 99c9720ab356a0642a771bea13969a05
   m_configObjects:
     com.unity.dt.app-ui: {fileID: 11400000, guid: 1b1c20d82303e4b5781c3ef50ac1449f, type: 2}
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
+    com.unity.xr.management.loader_settings: {fileID: 11400000, guid: bba09b7c7f0892d4d85bcd06b6b45fb8, type: 2}
+    com.unity.xr.openxr.settings4: {fileID: 11400000, guid: ab7d379832f4688409f6a556ec69280d, type: 2}

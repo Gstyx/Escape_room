@@ -6,7 +6,8 @@ namespace EscapeRoom
 {
     /// <summary>Puzzle 2 (Fase 2, No-Zero): log decryption by chronological order.
     ///
-    /// Four stabilized data packets carry hex Unix timestamps. The player puts
+    /// Four log packets carry a clock time (D-235: plain HH:MM instead of hex Unix
+    /// timestamps - a fair visitor sorts 07:13 &lt; 09:27 at a glance, nobody sorts 0x64F8B7). The player puts
     /// them into four slots oldest-first (click a block, then click a slot -
     /// click-click instead of drag, because with a locked cursor the click is
     /// resolved at the screen centre and a real drag cannot be aimed).
@@ -17,10 +18,10 @@ namespace EscapeRoom
     {
         public string[] packetHex = new string[]
         {
-            "0x64F8A3",
-            "0x64F8B7",
-            "0x64F8C1",
-            "0x64F8D9",
+            "07:13",
+            "09:27",
+            "12:41",
+            "16:59",
         };
 
         /// <summary>Display scramble: which packet each block button shows.</summary>
@@ -55,8 +56,13 @@ namespace EscapeRoom
         public AudioClip errorClip;
 
         // ---------------------------------------------------------------- pure logic
+        /// <summary>Sort key of a packet: "HH:MM" -> minutes of the day; "0x..." -> hex value
+        /// (the pre-D-235 packets, kept parseable so an old scene still sorts).</summary>
         public static uint ParseHex(string s)
         {
+            int colon = s.IndexOf(':');
+            if (colon > 0)
+                return (uint)(int.Parse(s.Substring(0, colon)) * 60 + int.Parse(s.Substring(colon + 1)));
             string t = s.StartsWith("0x") ? s.Substring(2) : s;
             return System.Convert.ToUInt32(t, 16);
         }
@@ -193,7 +199,8 @@ namespace EscapeRoom
             {
                 if (solved)
                 {
-                    statusLabel.text = "ORDEM ACEITA - LEIA O ULTIMO DIGITO DE CADA PACOTE";
+                    // D-235: the PIN is handed over, not deduced - the sort IS the puzzle.
+                    statusLabel.text = "ORDEM CERTA! SENHA DO COFRE: " + DerivedPin();
                     statusLabel.color = EsTheme.ScreenOn;
                 }
                 else if (!CanInteract())
@@ -203,7 +210,7 @@ namespace EscapeRoom
                 }
                 else
                 {
-                    statusLabel.text = "ORDENE OS PACOTES DO MENOR PARA O MAIOR";
+                    statusLabel.text = "ORDENE DO MAIS CEDO AO MAIS TARDE";
                     statusLabel.color = EsTheme.Amber;
                 }
             }

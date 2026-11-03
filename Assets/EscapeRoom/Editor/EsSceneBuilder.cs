@@ -1768,7 +1768,7 @@ public static class EsSceneBuilder
                     && pathKeys.Contains(nc * grid.rows + nr)) { adjRot++; break; }
             }
         }
-        bool ok1b = adjRot >= 1;
+        bool ok1b = grid.easyMode || adjRot >= 1;   // D-235: no caps in easy mode
         if (!ok1b) fails++;
         Debug.Log("[SelfTest13] route-adjacent rotatables = " + adjRot + "   "
                   + (ok1b ? "PASS (caps present)" : "FAIL (no caps?)"));
@@ -1831,7 +1831,8 @@ public static class EsSceneBuilder
         // would accept these, the strict rule must not.
         foreach (var n in grid.nodes) grid.SetRotationSilent(n, n.solvedRotation);
         grid.DebugResetPower();
-        bool found = DiscriminatingLeak(grid, 1) || DiscriminatingLeak(grid, 2);
+        // D-235: easy mode has no leak rule, so there is nothing to discriminate.
+        bool found = grid.easyMode || DiscriminatingLeak(grid, 1) || DiscriminatingLeak(grid, 2);
         if (!found) fails++;
         Debug.Log("[SelfTest13] receptor-fed-with-leak rejected = " + found + "   "
                   + (found ? "PASS (strict rule bites)" : "FAIL - path-only would accept everything"));
@@ -1897,7 +1898,7 @@ public static class EsSceneBuilder
             }
             else if (tm == grid.leafMat || tm == grid.leafLiveMat) badLeaf++;
         }
-        bool ok8 = leaves >= 2 && badLeaf == 0 && grid.leafMat != null && grid.leafLiveMat != null
+        bool ok8 = (grid.easyMode || leaves >= 2) && badLeaf == 0 && grid.leafMat != null && grid.leafLiveMat != null
                    && grid.leafMat != grid.baseMat && grid.leafLiveMat != grid.liveTileMat;
         if (!ok8) fails++;
         Debug.Log("[SelfTest13] leaf colors: leaves=" + leaves + " violations=" + badLeaf + "   "
@@ -6677,9 +6678,12 @@ public static class EsSceneBuilder
 
     static void BuildMaterials()
     {
-        _shell    = Mat("M_Shell",    EsTheme.Shell,    0.55f, 0.35f, Color.black, 0f);
-        _shellDark= Mat("M_ShellDark",EsTheme.ShellDark,0.35f, 0.20f, Color.black, 0f);
-        _metal    = Mat("M_Metal",    EsTheme.Metal,    0.85f, 0.60f, Color.black, 0f);
+        // D-235: metallic 0.55/0.35/0.85 -> 0.10/0.05/0.40. A metal gets its brightness from
+        // reflections, and D-210 cut reflectionIntensity to 0.15 - so every crate, bench, counter
+        // and safe built from these rendered as a pure-black silhouette, even right under a lamp.
+        _shell    = Mat("M_Shell",    EsTheme.Shell,    0.10f, 0.30f, Color.black, 0f);
+        _shellDark= Mat("M_ShellDark",EsTheme.ShellDark,0.05f, 0.20f, Color.black, 0f);
+        _metal    = Mat("M_Metal",    EsTheme.Metal,    0.40f, 0.50f, Color.black, 0f);
         // The kit's own wall material, so an additive wall piece is indistinguishable from a kit tile.
         // Loaded as an ASSET and not recreated: the kit is a single atlas shared by every model, and a
         // runtime-created copy of it would not survive the saved scene (D-41's reasoning).
@@ -6709,7 +6713,7 @@ public static class EsSceneBuilder
         _fiber    = Mat("M_Fiber",    new Color32(0x1A,0x08,0x08,0xFF), 0f, 0.40f, new Color(1f, 0.20f, 0.15f), 0.50f);
         // Hex mesh puzzle (Fase 1): dark tile, dim-red dead ports, cyan live ports,
         // amber emitter/receptor bodies. Assets, never runtime (D-23/D-49).
-        _hexBase  = Mat("M_HexBase",  new Color32(0x16,0x1A,0x1F,0xFF), 0.60f, 0.35f, Color.black, 0f);
+        _hexBase  = Mat("M_HexBase",  new Color32(0x2C,0x32,0x3A,0xFF), 0.10f, 0.35f, Color.black, 0f);   // D-235: was black metal
         _hexDim   = Mat("M_HexDim",   new Color32(0x3A,0x0E,0x0C,0xFF), 0f, 0.50f, new Color(0.85f, 0.12f, 0.12f), 0.2f);
         _hexLive  = Mat("M_HexLive",  EsTheme.CardCyan, 0f, 0.50f, EsTheme.CardCyan, 0.50f);
         _hexSrc   = Mat("M_HexSrc",   new Color32(0x4A,0x32,0x0E,0xFF), 0.30f, 0.40f, EsTheme.KeyAccent, 0.30f);
@@ -7114,10 +7118,10 @@ public static class EsSceneBuilder
         lTitle.rectTransform.offsetMin = new Vector2(15, -100); lTitle.rectTransform.offsetMax = new Vector2(-15, -25);
 
         var lBody = EsUi.Label(log.transform, "B",
-            "MALHA HEXAGONAL\n" +
-            "EMISSOR ATE O RECEPTOR\nSEM PORTA PARA O VAZIO\n\n" +
-            "LOGS: DO MENOR PARA\nO MAIOR. O ULTIMO\nDIGITO ABRE O COFRE\n\n" +
-            "PLACAS: GIRE ATE A\nLUZ DESENHAR O 4",
+            // D-235: each step stated as an action with a visible "done" signal.
+            "1. ENERGIA: GIRE AS PECAS\nATE ACENDER O RECEPTOR\n\n" +
+            "2. LOGS: DO MAIS CEDO AO\nMAIS TARDE. A TELA DA\nA SENHA DO COFRE\n\n" +
+            "3. PLACAS: GIRE CADA UMA\nATE O BOTAO FICAR VERDE",
             40, new Color(0.88f, 0.86f, 0.78f), TextAnchor.UpperLeft);
         lBody.rectTransform.anchorMin = Vector2.zero; lBody.rectTransform.anchorMax = Vector2.one;
         lBody.rectTransform.offsetMin = new Vector2(45, 40); lBody.rectTransform.offsetMax = new Vector2(-45, -120);
@@ -7423,7 +7427,7 @@ public static class EsSceneBuilder
         // the ambient contributes 0,0000 - despite ambientIntensity 0,30. **The floor with every
         // light group off is 0,0833**, so these panels cannot be pushed much further before they stop
         // reading as lamps at all.
-        ll.type = LightType.Point; ll.range = 7f; ll.intensity = 0.16f;
+        ll.type = LightType.Point; ll.range = 7f; ll.intensity = 2.50f;   // D-235
         ll.color = new Color(1.0f, 0.95f, 0.86f);
         ll.shadows = LightShadows.None;
         ll.renderMode = LightRenderMode.ForcePixel;
@@ -7499,7 +7503,9 @@ public static class EsSceneBuilder
         var cv = EsUi.WorldCanvas(parent, name, pos, new Vector3(0f, 180f, 0f),
                                   new Vector2(640f, 200f),
                                   new Color(0.10f, 0.02f, 0.02f, 0.72f));
-        cv.GetComponent<RectTransform>().localScale = Vector3.one * 0.004f;   // 2.56 x 0.80 m
+        // D-235: 0.004 (2.56 m) -> 0.0028 (1.79 m). At 2.56 m the two holograms abutted at
+        // x = -2.3 and, at different depths, read as one doubled "ACESSO NEGADO ACESSO NEGADO".
+        cv.GetComponent<RectTransform>().localScale = Vector3.one * 0.0028f;
         var t = EsUi.Label(cv.transform, "Msg", "ACESSO NEGADO", 64,
                            new Color(1f, 0.25f, 0.22f),
                            TextAnchor.MiddleCenter, FontStyle.Bold);
@@ -7747,7 +7753,7 @@ public static class EsSceneBuilder
             puzzle.slotButtons[i] = s;
             puzzle.slotLabels[i] = s.GetComponentInChildren<Text>();
         }
-        var lst = EsUi.Label(logGo.transform, "LogStatus", "ORDENE OS PACOTES DO MENOR PARA O MAIOR", 38,
+        var lst = EsUi.Label(logGo.transform, "LogStatus", "ORDENE DO MAIS CEDO AO MAIS TARDE", 38,
                              EsTheme.Amber, TextAnchor.MiddleCenter, FontStyle.Bold);
         lst.rectTransform.anchorMin = new Vector2(0, 1); lst.rectTransform.anchorMax = new Vector2(1, 1);
         lst.rectTransform.offsetMin = new Vector2(20, -520); lst.rectTransform.offsetMax = new Vector2(-20, -420);
@@ -8067,7 +8073,7 @@ public static class EsSceneBuilder
         // 0,40 here matches EscapeGameManager.emergencyIntensity, which is the owner that actually runs
         // last - see D-202. Both files say the same number on purpose: when one value has two
         // owners, leaving them to disagree guarantees that whoever reads next is misled.
-        rl.type = LightType.Point; rl.range = 11f; rl.intensity = 0.40f;
+        rl.type = LightType.Point; rl.range = 11f; rl.intensity = 2.00f;   // D-235: 0.40 -> 1.00 (fair: legible in a headset)
         // Emergency red: Fase 0 (A.E.G.I.S.) starts the room in quarantine light.
         // Fase 1 (energy mesh) restores blue via EscapeGameManager.SetPowerRestored().
         // The cool fills (PropFill/SouthFill) stay: readability was measured (D-113).
@@ -8084,7 +8090,7 @@ public static class EsSceneBuilder
         // where it comes from - and at range 13 it was out-lighting the six lamps the player can
         // actually see (0,30/range 5). D-113 kept a cool fill so the prop row stays readable; this
         // keeps that, at a level that reads as spill rather than as the room's main source.
-        fl.type = LightType.Point; fl.range = 7f; fl.intensity = 0.14f;
+        fl.type = LightType.Point; fl.range = 7f; fl.intensity = 1.20f;   // D-235
         fl.color = new Color(0.72f, 0.84f, 0.95f);
 
         var alarmGo = new GameObject("AlarmLight");
@@ -8105,7 +8111,7 @@ public static class EsSceneBuilder
         arcGo.transform.SetParent(root, false);
         arcGo.transform.position = new Vector3(10.30f, 2.75f, 2.0f);
         var arc = arcGo.AddComponent<Light>();
-        arc.type = LightType.Point; arc.range = 6.5f; arc.intensity = 0.45f;
+        arc.type = LightType.Point; arc.range = 6.5f; arc.intensity = 1.60f;   // D-235
         arc.color = new Color(1.0f, 0.88f, 0.70f);
 
         // south fill so the waiting area does not fall off into darkness
@@ -8114,7 +8120,7 @@ public static class EsSceneBuilder
         southGo.transform.position = new Vector3(0f, 2.70f, 7.5f);
         var sf = southGo.AddComponent<Light>();
         // same reasoning as PropFill, weaker: 0,55/14 -> 0,18/7
-        sf.type = LightType.Point; sf.range = 7f; sf.intensity = 0.12f;
+        sf.type = LightType.Point; sf.range = 7f; sf.intensity = 1.20f;   // D-235
         sf.color = new Color(0.75f, 0.85f, 0.95f);
         return res;
     }
@@ -8372,7 +8378,10 @@ public static class EsSceneBuilder
         // read BRIGHTER - so the ambient had to fall further to land darker rather than lighter.
         // The colours above are UNCHANGED on purpose: the player asked for less light, not a
         // different light, and re-grading the ambient hue at the same time would confound the two.
-        RenderSettings.ambientIntensity = 0.30f;
+        // D-235: 0.30 -> 0.75. At 0.30 the review screenshots showed furniture as black silhouettes
+        // and a void for a ceiling; for a fair visitor in a headset, legibility beats mood.
+        RenderSettings.ambientIntensity = 0.75f;
+        EscapeRoom.EsTheme.ApplyAmbientFill();   // the line above alone never reaches the probe
     }
 
     static void BuildPostFx()

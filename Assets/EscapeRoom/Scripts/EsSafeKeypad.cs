@@ -175,7 +175,9 @@ namespace EscapeRoom
         public void OnLogsSolved()
         {
             if (solved || statusLabel == null) return;
-            statusLabel.text = "PIN 4 DIGITOS - DEL APAGA - LIMPAR ZERA";
+            // D-235: name the PIN outright - the logs already showed it, and a visitor who
+            // walked across the room should not have to remember four digits.
+            statusLabel.text = "DIGITE " + correctPin + " E APERTE ENTER";
             statusLabel.color = EsTheme.Amber;
         }
     }

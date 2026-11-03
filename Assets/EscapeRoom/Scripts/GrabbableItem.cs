@@ -137,9 +137,11 @@ namespace EscapeRoom
         {
             if (IsHeld)
             {
-                Vector3 target = _holder.position
-                                 + _holder.forward * holdDistance
-                                 + Vector3.up * holdHeight;
+                // In VR the holder is already a point in front of the hand, so the item sits in
+                // the hand instead of 1,9 m down the laser.
+                Vector3 target = EsVR.Active
+                    ? _holder.position
+                    : _holder.position + _holder.forward * holdDistance + Vector3.up * holdHeight;
                 float t = 1f - Mathf.Exp(-followSpeed * Time.fixedDeltaTime);
                 _rb.MovePosition(Vector3.Lerp(_rb.position, target, t));
                 _rb.MoveRotation(Quaternion.Slerp(_rb.rotation, _holder.rotation, t));

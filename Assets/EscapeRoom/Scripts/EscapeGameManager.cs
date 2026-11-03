@@ -50,6 +50,7 @@ namespace EscapeRoom
 
         void Awake()
         {
+            EsTheme.ApplyAmbientFill();   // D-235
             Instance = this;
             _remaining = reserveSeconds;
             if (ambientClip != null) EsAudio.Music(ambientClip, musicVolume);
@@ -213,7 +214,7 @@ namespace EscapeRoom
         // not a text change, it is making the reward real: the room starts dark and solving the
         // mesh LIGHTS IT.
         public Light[] ceilingLamps;
-        public float ceilingLampIntensity = 0.16f;
+        public float ceilingLampIntensity = 2.50f;   // D-235: 0.16 -> 2.50
 
         public Color emergencyColor = new Color(1f, 0.16f, 0.14f);
         // 0,85 -> 0,55. These two fields are the REAL intensity of the room light, not BuildLights:
@@ -223,9 +224,9 @@ namespace EscapeRoom
         // emergencyIntensity and restoredIntensity are scaled by the same 0,65 factor, because
         // restoredIntensity used to be HIGHER (1,15) than the emergency state: solving the hex grid
         // was making the room brighter than before it, from a light with no visible fixture.
-        public float emergencyIntensity = 0.40f;
+        public float emergencyIntensity = 2.00f;   // D-235: 0.40 -> 2.00
         public Color restoredColor = new Color(0.55f, 0.75f, 1f);
-        public float restoredIntensity = 0.55f;
+        public float restoredIntensity = 3.00f;   // D-235: 0.55 -> 3.00
 
         public void SetEmergencyLighting()
         {

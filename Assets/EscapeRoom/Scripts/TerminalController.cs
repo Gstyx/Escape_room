@@ -97,11 +97,11 @@ namespace EscapeRoom
             if (hex != null && !hex.powerRestored)
                 hint = "OBJETIVO: REATIVE A MALHA HEXAGONAL (NORTE)";
             else if (logPuzzle != null && !logPuzzle.solved)
-                hint = "OBJETIVO: ORDENE OS LOGS DO MENOR PARA O MAIOR (OESTE)";
+                hint = "OBJETIVO: ORDENE OS LOGS POR HORARIO (OESTE)";
             else if (safePad != null && !safePad.solved)
-                hint = "OBJETIVO: LEIA O ULTIMO DIGITO E ABRA O COFRE (OESTE)";
+                hint = "OBJETIVO: DIGITE A SENHA NO COFRE (OESTE)";
             else if (plateReader != null && !plateReader.approved)
-                hint = "OBJETIVO: REVELE O DIGITO NO LEITOR OPTICO (LESTE)";
+                hint = "OBJETIVO: ENCAIXE AS 3 PLACAS NO LEITOR (LESTE)";
             else
                 // "BUNKER" was mine and it was wrong (D-221): this room is a bank branch inside a crypto
                 // research module - Filial 9, BANCO ARTICO - not a bunker, and the fiction never had

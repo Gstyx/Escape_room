@@ -1,5 +1,11 @@
 # COMO ESCAPAR — os tres enigmas, como funcionam e o que exigem
 
+> **Atualizacao D-235 (modo feira):** os enigmas foram facilitados. Malha: basta a energia chegar
+> ao receptor (sem regra de vazamento). Logs: horarios `07:13 09:27 12:41 16:59` e a tela mostra a
+> senha 3719. Placas: cada botao GIRAR fica verde quando a placa esta certa. O texto abaixo descreve
+> a versao estrita (`EsHexGrid.easyMode = false`).
+
+
 Precede `LORE.md` e responde a uma pergunta que a lore sozinha nao responde: **que
 pessoa tem que ser o jogador** para estes tres enigmas fazerem sentido. Le a secao 4
 depois de ler os tres.
