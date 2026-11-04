@@ -67,6 +67,12 @@ namespace EscapeRoom
         public float cellSize = 0.30f;
         public int seed = 2142;
 
+        /// <summary>D-235 (feira): win = receptor fed, nothing else. No terminator caps and
+        /// no leak rule - the strict D-180/D-184 board proved too hard for a science-fair
+        /// visitor who has five minutes and has never seen the game. False restores the
+        /// strict board exactly (same seed, same generator path).</summary>
+        public bool easyMode = true;
+
         [Header("Materiais (assets, nunca runtime)")]
         public Material baseMat;
         public Material dimMat;
@@ -139,7 +145,7 @@ namespace EscapeRoom
             // (teal leaf). A cap turned away dangles its path cell while the
             // receptor stays fed - the fed-with-leak witness the rule exists for.
             var capCells = new HashSet<int>();
-            int capsWanted = 2;
+            int capsWanted = easyMode ? 0 : 2;
             for (int i = 1; i < path.Count - 1 && capsWanted > 0; i++)
             {
                 int c = path[i] / rows, r = path[i] % rows;
@@ -168,7 +174,7 @@ namespace EscapeRoom
                 capsWanted--;
             }
             capsPlaced = 2 - capsWanted;
-            if (capsPlaced == 0)
+            if (capsPlaced == 0 && !easyMode)
                 Debug.LogWarning("[HexGrid] no room for terminator caps - leak rule vacuous on this board.");
 
             var adjSet = new List<int>();
@@ -225,6 +231,7 @@ namespace EscapeRoom
                         }
                     }
                 ok = StrictSolved(baseMask, solvedRot);
+                if (ok && easyMode) { strictPass++; break; }   // no leak rule, no witness to find
                 if (ok)
                 {
                     strictPass++;
@@ -425,6 +432,7 @@ namespace EscapeRoom
             var live = Energized(bases, rots);
             int r0 = rows / 2;
             if (!live.Contains((cols - 1) * rows + r0)) return false;   // receptor dark
+            if (easyMode) return true;                                   // D-235: fed is enough
             foreach (int key in live)
             {
                 int c = key / rows, r = key % rows;
@@ -526,8 +534,8 @@ namespace EscapeRoom
             if (statusLabel != null)
             {
                 if (powerRestored) { statusLabel.text = "MALHA ESTAVEL - ENERGIA RESTAURADA"; statusLabel.color = EsTheme.ScreenOn; }
-                else if (live.ContainsKey((cols - 1) * rows + rows / 2)) { statusLabel.text = "RECEPTOR ALIMENTADO - VAZAMENTO NA MALHA"; statusLabel.color = EsTheme.Amber; }
-                else { statusLabel.text = "LIGUE O EMISSOR AO RECEPTOR"; statusLabel.color = EsTheme.Warn; }
+                else if (!easyMode && live.ContainsKey((cols - 1) * rows + rows / 2)) { statusLabel.text = "RECEPTOR ALIMENTADO - VAZAMENTO NA MALHA"; statusLabel.color = EsTheme.Amber; }
+                else { statusLabel.text = "LEVE A ENERGIA ATE O RECEPTOR"; statusLabel.color = EsTheme.Warn; }
             }
         }
 

@@ -103,8 +103,11 @@ namespace EscapeRoom
 
             // UI wins: never let a world raycast steal a click meant for the Canvas.
             if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject()) return;
+            // VR form of the same rule (EsVRRig resolved the laser's canvas target this frame),
+            // plus the intro/end card, behind which the room is inert.
+            if (EsVR.Active && (EsVR.UiHovered != null || EsVR.ModalOpen)) return;
 
-            Ray ray = _cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            Ray ray = AimRay();
             // RaycastAll, not Raycast: the held item hangs under this very ray and must be
             // filtered by FirstSolidHit instead of winning it (see above).
             var hits = Physics.RaycastAll(ray, interactDistance, ~0, QueryTriggerInteraction.Collide);
@@ -134,7 +137,7 @@ namespace EscapeRoom
             var grabbable = hit.collider.GetComponentInParent<GrabbableItem>();
             if (grabbable != null && !grabbable.IsHeld && !grabbable.pickupLocked)
             {
-                grabbable.PickUp(_hold);
+                grabbable.PickUp(EsVR.Active && EsVR.HoldPoint != null ? EsVR.HoldPoint : _hold);
                 _held = grabbable;
                 return;
             }
@@ -145,7 +148,7 @@ namespace EscapeRoom
         void UpdatePrompt()
         {
             if (_cam == null) { _prompt = ""; return; }
-            Ray ray = _cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            Ray ray = AimRay();
             var hits = Physics.RaycastAll(ray, interactDistance, ~0, QueryTriggerInteraction.Collide);
             RaycastHit hit;
             // The held filter is a no-op empty-handed; holding, the key hanging in front of
@@ -190,8 +193,16 @@ namespace EscapeRoom
             _prompt = free;
         }
 
+        /// <summary>Screen centre on desktop; the active controller's laser in VR (D-234).</summary>
+        Ray AimRay()
+        {
+            if (EsVR.Active && EsVR.AimOrigin != null) return EsVR.AimRay;
+            return _cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+        }
+
         static bool ReadPress()
         {
+            if (EsVR.PressedThisFrame) return true;
             var m = Mouse.current;
             if (m != null && m.leftButton.wasPressedThisFrame) return true;
             var k = Keyboard.current;

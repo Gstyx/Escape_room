@@ -17,6 +17,9 @@ nova, **adicone-a ao `DECISOES.md`** com o próximo ID livre.
 - Scripts do projeto: `Assets/EscapeRoom/Scripts/` · builder de editor:
   `Assets/EscapeRoom/Editor/EsSceneBuilder.cs` (menu **Tools/Escape Room/Build Level**)
 - Áudio: `Assets/EscapeRoom/Audio/` (gerado por `generate_audio.py` via `uv run`)
+- **VR (D-234):** OpenXR 1.18.0. `Assets/EscapeRoom/Scripts/VR/` — `EsVRRig` se monta em
+  runtime só com headset ativo; os enigmas não sabem que VR existe (o hub lê `EsVR` para
+  raio e clique). Setup: **Tools/Escape Room/VR/Configure VR (OpenXR)**. Guia: `COMO-JOGAR-VR.md`.
 
 ## Regras operacionais ao usar o MCP do Unity
 

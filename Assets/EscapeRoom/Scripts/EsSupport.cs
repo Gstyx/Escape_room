@@ -16,8 +16,26 @@ namespace EscapeRoom
     /// <summary>Shared palette + primitive factory so every built material matches.</summary>
     public static class EsTheme
     {
-        public static readonly Color Shell     = new Color32(0x2A, 0x30, 0x38, 0xFF);
-        public static readonly Color ShellDark = new Color32(0x16, 0x1A, 0x1F, 0xFF);
+        /// <summary>D-235: flat ambient fill written straight into the ambient probe. Setting
+        /// RenderSettings.ambient* alone does nothing here - the probe is only recomputed by a
+        /// lighting bake this project never runs (D-216 measured ambient = 0,0000), so every face
+        /// turned away from a lamp rendered pure black.</summary>
+        public static readonly Color AmbientFill = new Color(0.20f, 0.22f, 0.26f);
+
+        public static void ApplyAmbientFill()
+        {
+            RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
+            RenderSettings.ambientLight = AmbientFill;
+            DynamicGI.UpdateEnvironment();
+            var sh = new UnityEngine.Rendering.SphericalHarmonicsL2();
+            sh.AddAmbientLight(AmbientFill);
+            RenderSettings.ambientProbe = sh;
+        }
+
+        public static readonly Color Shell     = new Color32(0x4A, 0x52, 0x5C, 0xFF);   // D-235: was 0x2A3038
+        // D-235: 0x161A1F rendered every bench, crate and counter as a pure-black silhouette
+        // (measured in review screenshots) - the room read as cut-outs, worst in the headset.
+        public static readonly Color ShellDark = new Color32(0x34, 0x3A, 0x43, 0xFF);
         public static readonly Color Metal     = new Color32(0x5A, 0x64, 0x70, 0xFF);
         public static readonly Color ScreenBg  = new Color32(0x03, 0x10, 0x0E, 0xFF);
         public static readonly Color ScreenOn  = new Color32(0x3C, 0xE8, 0xA4, 0xFF);

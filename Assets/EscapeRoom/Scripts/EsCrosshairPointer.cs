@@ -58,6 +58,9 @@ namespace EscapeRoom
 
         void Update()
         {
+            // In a headset there is no screen centre and no cursor; EsVRRig drives TickVR instead.
+            if (EsVR.Active) return;
+
             var module = GetComponent<BaseInputModule>();
 
             // ONE POINTER, NOT TWO. While the cursor is locked, the crosshair IS the pointer, so the
@@ -199,6 +202,103 @@ namespace EscapeRoom
                     best = handler; bestDist = d;
                 }
             }
+            return best;
+        }
+
+        /// <summary>Distance along the laser to the element <see cref="TickVR"/> last chose, or 0.</summary>
+        public float VRHitDistance { get; private set; }
+
+        /// <summary>The VR form of <see cref="Update"/>, driven by <see cref="EsVRRig"/> with the
+        /// controller's ray. Same contract as the crosshair: the element that lights up is exactly
+        /// the element a press reaches, and puzzle input only matches inside the tight cone.
+        /// Returns the hovered handler, or null.</summary>
+        public GameObject TickVR(Ray ray, float maxDistance, float solidDistance,
+                                 float snapAngle, float looseAngle, bool press)
+        {
+            float dist;
+            var over = FindTargetVR(ray, maxDistance, solidDistance, snapAngle, looseAngle, out dist);
+            VRHitDistance = over != null ? dist : 0f;
+            if (over != Hovered)
+            {
+                if (Hovered != null && Hovered.TryGetComponent<EsHoverHighlight>(out var oldHl))
+                    oldHl.SetHovered(false);
+                Hovered = over;
+                if (Hovered != null && Hovered.TryGetComponent<EsHoverHighlight>(out var newHl))
+                    newHl.SetHovered(true);
+            }
+            if (!press || over == null) return over;
+
+            var es = EventSystem.current;
+            if (es == null) return over;
+            var cam = Camera.main;
+            Vector3 at = ray.GetPoint(dist);
+            var ped = new PointerEventData(es)
+            {
+                position = cam != null ? (Vector2)cam.WorldToScreenPoint(at) : Vector2.zero,
+                button = PointerEventData.InputButton.Left,
+                clickTime = Time.unscaledTime,
+                clickCount = 1,
+                eligibleForClick = true,
+                pointerPress = over,
+                pointerClick = over
+            };
+            if (verboseClicks) Debug.Log("[Click] laser -> " + over.name);
+            ExecuteEvents.Execute(over, ped, ExecuteEvents.pointerClickHandler);
+            return over;
+        }
+
+        /// <summary>Nearest clickable world-space element to the laser, judged by ANGLE from the
+        /// ray rather than screen pixels: the laser's own "radius". While a modal card is open only
+        /// its canvas is eligible, so the room behind INICIAR stays inert as on desktop.</summary>
+        public GameObject FindTargetVR(Ray ray, float maxDistance, float solidDistance,
+                                       float snapAngle, float looseAngle, out float hitDistance)
+        {
+            hitDistance = 0f;
+            GameObject best = null;
+            float bestAngle = float.MaxValue, bestEnter = float.MaxValue;
+            var seen = new HashSet<GameObject>();
+
+            foreach (var canvas in Object.FindObjectsByType<Canvas>())
+            {
+                if (canvas == null || !canvas.isActiveAndEnabled) continue;
+                if (canvas.renderMode != RenderMode.WorldSpace) continue;
+                if (EsVR.ModalOpen && !EsVR.IsModalCanvas(canvas.rootCanvas)) continue;
+
+                foreach (var g in canvas.GetComponentsInChildren<Graphic>(false))
+                {
+                    if (!g.raycastTarget || !g.gameObject.activeInHierarchy) continue;
+                    var sel = g.GetComponent<Selectable>();
+                    if (sel != null && (!sel.IsActive() || !sel.IsInteractable())) continue;
+
+                    var handler = ExecuteEvents.GetEventHandler<IPointerClickHandler>(g.gameObject);
+                    if (handler == null) continue;
+                    if (!seen.Add(handler)) continue;   // one vote per handler
+
+                    var rt = g.rectTransform;
+                    var plane = new Plane(rt.forward, rt.position);
+                    float enter;
+                    if (!plane.Raycast(ray, out enter) || enter <= 0f || enter > maxDistance) continue;
+                    // A wall in front of the canvas hides it from the laser (5 cm slack for the
+                    // panel the canvas is mounted on).
+                    if (enter > solidDistance + 0.05f) continue;
+
+                    Vector3 local = rt.InverseTransformPoint(ray.GetPoint(enter));
+                    Rect r = rt.rect;
+                    Vector3 ls = rt.lossyScale;
+                    float dx = Mathf.Max(r.xMin - local.x, 0f, local.x - r.xMax) * Mathf.Abs(ls.x);
+                    float dy = Mathf.Max(r.yMin - local.y, 0f, local.y - r.yMax) * Mathf.Abs(ls.y);
+                    float angle = Mathf.Atan2(Mathf.Sqrt(dx * dx + dy * dy), enter) * Mathf.Rad2Deg;
+
+                    float limit = IsPuzzleInput(handler) ? snapAngle : looseAngle;
+                    if (angle >= limit) continue;
+                    // Inside two rects at once (angle 0 for both), the nearer surface wins.
+                    bool better = angle < bestAngle - 0.0001f
+                                  || (Mathf.Abs(angle - bestAngle) <= 0.0001f && enter < bestEnter);
+                    if (!better) continue;
+                    best = handler; bestAngle = angle; bestEnter = enter;
+                }
+            }
+            if (best != null) hitDistance = bestEnter;
             return best;
         }
 
