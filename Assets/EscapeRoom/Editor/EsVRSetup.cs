@@ -41,6 +41,9 @@ public static class EsVRSetup
             Debug.Log("[VR] Modulo Android nao instalado - configurado so PC VR (Quest via Link/Air Link, SteamVR).");
 
         EnsureGameSceneFirst();
+        // D-236: a headset game must keep running when the PC window loses focus (Link dashboard,
+        // SteamVR overlay, the operator clicking elsewhere) - otherwise the game pauses or input stops.
+        PlayerSettings.runInBackground = true;
         AssetDatabase.SaveAssets();
         Debug.Log("[VR] OpenXR configurado. Conecte o headset (Quest Link / SteamVR) e de Play.");
     }

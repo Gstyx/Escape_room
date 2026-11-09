@@ -32,11 +32,14 @@ namespace EscapeRoom
             RenderSettings.ambientProbe = sh;
         }
 
-        public static readonly Color Shell     = new Color32(0x4A, 0x52, 0x5C, 0xFF);   // D-235: was 0x2A3038
+        // D-236: lighter again. The kit floor and walls are near-white, so at 0x4A525C (about 7 %
+        // linear reflectance) props were ~11x darker than the floor under the same lamp and still
+        // read as black cut-outs in the headset. These sit at roughly a third of the kit's value.
+        public static readonly Color Shell     = new Color32(0x8C, 0x96, 0xA0, 0xFF);   // D-235: 0x4A525C
         // D-235: 0x161A1F rendered every bench, crate and counter as a pure-black silhouette
         // (measured in review screenshots) - the room read as cut-outs, worst in the headset.
-        public static readonly Color ShellDark = new Color32(0x34, 0x3A, 0x43, 0xFF);
-        public static readonly Color Metal     = new Color32(0x5A, 0x64, 0x70, 0xFF);
+        public static readonly Color ShellDark = new Color32(0x5E, 0x68, 0x74, 0xFF);   // D-235: 0x343A43
+        public static readonly Color Metal     = new Color32(0xA0, 0xA9, 0xB3, 0xFF);   // D-235: 0x5A6470
         public static readonly Color ScreenBg  = new Color32(0x03, 0x10, 0x0E, 0xFF);
         public static readonly Color ScreenOn  = new Color32(0x3C, 0xE8, 0xA4, 0xFF);
         public static readonly Color Warn      = new Color32(0xE8, 0x3A, 0x3A, 0xFF);

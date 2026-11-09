@@ -6,6 +6,9 @@ using UnityEngine.InputSystem;
 using UnityEngine.UI;
 using UnityEngine.XR;
 using TrackedPoseDriver = UnityEngine.InputSystem.XR.TrackedPoseDriver;
+using XRDev = UnityEngine.XR.InputDevice;
+using XRDevs = UnityEngine.XR.InputDevices;
+using XRUse = UnityEngine.XR.CommonUsages;
 
 namespace EscapeRoom
 {
@@ -22,7 +25,7 @@ namespace EscapeRoom
     /// <para><b>What it does NOT touch.</b> No puzzle script knows VR exists. The hub reads
     /// <see cref="EsVR"/> for its ray and click; this rig feeds that state and draws the laser.</para>
     ///
-    /// <para><b>Controls.</b> Trigger or grip: interact (the hand that pressed becomes the pointer).
+    /// <para><b>Controls.</b> Trigger or grip: interact with what the hand touches, else with what the laser points at (D-236); the hand that pressed becomes the pointer. WASD / Q R on the PC keyboard also walk / turn.
     /// Left stick: walk. Right stick: snap turn. Left menu button held 2 s, or F5 on the PC keyboard:
     /// restart for the next visitor. F6 or right stick click: recentre.</para>
     ///
@@ -32,8 +35,11 @@ namespace EscapeRoom
     public class EsVRRig : MonoBehaviour
     {
         [Header("Locomocao")]
-        public float moveSpeed = 1.6f;
-        public float snapTurnDegrees = 30f;
+        // D-237: the fair booths have no room to walk, so the visitor stands still and ALL travel is
+        // the left stick. 2,0 m/s crosses the 24 m room in ~12 s (1,6 took 15 s); 45 deg snaps mean
+        // fewer flicks for someone who cannot turn their body much in a small booth.
+        public float moveSpeed = 2.0f;
+        public float snapTurnDegrees = 45f;
         public float stickDeadzone = 0.2f;
 
         [Header("Laser")]
@@ -80,17 +86,34 @@ namespace EscapeRoom
 
         // --- input
         readonly List<InputAction> _actions = new List<InputAction>();
-        InputAction _move, _turn, _menu, _recentre;
 
         class Hand
         {
             public XRNode node;
+            public float outward;                       // -1 left, +1 right: the back of the hand
             public Transform grip, aim, hold;
-            public InputAction trigger, gripBtn, aimPos;
+            public InputAction trigger, gripBtn, triggerAxis, gripAxis, stick, menuBtn, stickClick;
+            public InputAction gripPos, gripRot, aimPos, aimRot;
             public LineRenderer laser;
             public Transform dot;
             public Renderer dotRenderer;
+            // D-236: second input path (UnityEngine.XR.InputDevices) and its edge detection.
+            public bool legacyTrigger, legacyGrip, legacyMenu, legacyClick;
+            public bool tracked;
+            public float curlIndex, curlFist;
+            public readonly List<Transform> fingerJoints = new List<Transform>();
+            public readonly List<float> jointWeight = new List<float>();
+            public Transform indexRoot, indexMid;
+            public Renderer[] skin;
+            public bool touching;
         }
+
+        static readonly Color GloveColor = new Color32(0xE6, 0xEE, 0xF2, 0xFF);
+        static readonly Color GloveTouch = new Color32(0x6C, 0xF0, 0x9C, 0xFF);
+        Material _gloveMat, _gloveTouchMat, _cuffMat;
+        float _xrSince = -1f;
+        Canvas _warnCanvas;
+        Text _warnText;
 
         class FloatingPanel
         {
@@ -104,15 +127,20 @@ namespace EscapeRoom
 
         IEnumerator Start()
         {
-            // OpenXR can take a few frames to bring the display up. Wait for it rather than guess;
-            // with no headset the rig removes itself and the desktop game runs untouched.
-            float until = Time.realtimeSinceStartup + 4f;
-            while (!XRSettings.isDeviceActive && Time.realtimeSinceStartup < until) yield return null;
-            if (!XRSettings.isDeviceActive)
+            // D-236: wait for the headset WITHOUT a deadline. The old 4 s timeout destroyed the rig
+            // when Quest Link / SteamVR took longer to bring the session up - the headset then
+            // showed the desktop game: no hands, no stick walking, mouse-only clicks. Polling is
+            // free and the desktop game is untouched while no headset is rendering.
+            bool told = false;
+            float t0 = Time.realtimeSinceStartup;
+            while (!XrRunning())
             {
-                Debug.Log("[VR] Nenhum headset ativo - jogo segue no modo desktop.");
-                Destroy(gameObject);
-                yield break;
+                if (!told && Time.realtimeSinceStartup - t0 > 4f)
+                {
+                    told = true;
+                    Debug.Log("[VR] Nenhum headset ativo ainda - jogo segue no modo desktop (o rig VR monta se o headset ligar).");
+                }
+                yield return new WaitForSecondsRealtime(0.25f);
             }
             if (!Build())
             {
@@ -129,8 +157,18 @@ namespace EscapeRoom
             _followHead = true;
         }
 
+        static bool XrRunning()
+        {
+            if (XRSettings.isDeviceActive) return true;
+            var displays = new List<XRDisplaySubsystem>();
+            SubsystemManager.GetSubsystems(displays);
+            foreach (var d in displays) if (d.running) return true;
+            return false;
+        }
+
         void OnDestroy()
         {
+            Application.onBeforeRender -= OnBeforeRender;
             foreach (var a in _actions) { a.Disable(); a.Dispose(); }
             _actions.Clear();
             if (_built)
@@ -158,6 +196,20 @@ namespace EscapeRoom
             _bodyT = _body.transform;
             _spawnYaw = _bodyT.eulerAngles.y;
 
+            // D-236: in a headset the PC window is often NOT focused (Link dashboard, SteamVR,
+            // the operator clicking elsewhere). Player Settings had runInBackground off, which
+            // pauses the game, and the Input System by default drops device input on focus loss.
+            Application.runInBackground = true;
+            InputSystem.settings.backgroundBehavior = InputSettings.BackgroundBehavior.IgnoreFocus;
+#if UNITY_EDITOR
+            InputSystem.settings.editorInputBehaviorInPlayMode =
+                InputSettings.EditorInputBehaviorInPlayMode.AllDeviceInputAlwaysGoesToGameView;
+#endif
+
+            _gloveMat = EsTheme.Lit(GloveColor, 0f, 0.45f);
+            _gloveTouchMat = EsTheme.Glow(GloveTouch, 1.2f);
+            _cuffMat = EsTheme.Lit(new Color32(0x2C, 0x5E, 0x6E, 0xFF), 0.1f, 0.5f);
+
             DisableDesktopControl();
             BuildOrigin();
             _left = BuildHand(XRNode.LeftHand, "LeftHand");
@@ -169,6 +221,10 @@ namespace EscapeRoom
             ConvertOverlays();
             BuildPromptLabel();
             BuildWrist();
+            BuildWarning();
+            Application.onBeforeRender += OnBeforeRender;
+            _xrSince = Time.realtimeSinceStartup;
+            LogDevices();
 
             // The UI module would otherwise turn the XR trigger into a second, mouse-positioned
             // click. Same rule as the locked desktop cursor: one pointer, not two.
@@ -236,54 +292,130 @@ namespace EscapeRoom
 
         Hand BuildHand(XRNode node, string side)
         {
-            var h = new Hand { node = node };
-            string usage = "{" + side + "}";
+            var h = new Hand { node = node, outward = node == XRNode.LeftHand ? -1f : 1f };
+            string c = "<XRController>{" + side + "}/";
 
+            // D-236: poses are written by hand every frame (UpdateHandPoses), from the Input
+            // System when it has the controller and from UnityEngine.XR.InputDevices otherwise.
+            // Relying on one TrackedPoseDriver path left the hands lying on the floor at the
+            // origin whenever that path had no device - which is what "no hands" looked like.
             h.grip = new GameObject(side + " Grip").transform;
             h.grip.SetParent(_offset, false);
-            var gtpd = h.grip.gameObject.AddComponent<TrackedPoseDriver>();
-            gtpd.trackingType = TrackedPoseDriver.TrackingType.RotationAndPosition;
-            gtpd.updateType = TrackedPoseDriver.UpdateType.UpdateAndBeforeRender;
-            gtpd.ignoreTrackingState = true;
-            gtpd.positionInput = new InputActionProperty(Value(side + "GripPos", "Vector3",
-                "<XRController>" + usage + "/devicePosition"));
-            gtpd.rotationInput = new InputActionProperty(Value(side + "GripRot", "Quaternion",
-                "<XRController>" + usage + "/deviceRotation"));
-
-            // The aim (pointer) pose is the one OpenXR defines for rays: it points where the
-            // controller visibly points, while the grip pose follows the fist and aims ~40 deg low.
             h.aim = new GameObject(side + " Aim").transform;
             h.aim.SetParent(_offset, false);
-            var atpd = h.aim.gameObject.AddComponent<TrackedPoseDriver>();
-            atpd.trackingType = TrackedPoseDriver.TrackingType.RotationAndPosition;
-            atpd.updateType = TrackedPoseDriver.UpdateType.UpdateAndBeforeRender;
-            atpd.ignoreTrackingState = true;
-            h.aimPos = Value(side + "AimPos", "Vector3", "<XRController>" + usage + "/pointerPosition");
-            atpd.positionInput = new InputActionProperty(h.aimPos);
-            atpd.rotationInput = new InputActionProperty(Value(side + "AimRot", "Quaternion",
-                "<XRController>" + usage + "/pointerRotation"));
+            h.gripPos = Value(side + "GripPos", "Vector3", c + "devicePosition", c + "gripPosition");
+            h.gripRot = Value(side + "GripRot", "Quaternion", c + "deviceRotation", c + "gripRotation");
+            // The aim (pointer) pose is the one OpenXR defines for rays: it points where the
+            // controller visibly points, while the grip pose follows the fist and aims ~40 deg low.
+            h.aimPos = Value(side + "AimPos", "Vector3", c + "pointerPosition");
+            h.aimRot = Value(side + "AimRot", "Quaternion", c + "pointerRotation");
 
             h.hold = new GameObject(side + " Hold").transform;
             h.hold.SetParent(h.grip, false);
-            h.hold.localPosition = new Vector3(0f, 0f, 0.09f);
+            h.hold.localPosition = new Vector3(0f, 0f, 0.07f);
 
-            BuildControllerModel(h.grip, side);
+            BuildHandModel(h, side);
             BuildLaser(h);
 
-            h.trigger = Button(side + "Trigger", "<XRController>" + usage + "/{TriggerButton}",
-                               "<XRController>" + usage + "/triggerPressed");
-            h.gripBtn = Button(side + "GripBtn", "<XRController>" + usage + "/{GripButton}",
-                               "<XRController>" + usage + "/gripPressed");
+            h.trigger = Button(side + "Trigger", c + "{TriggerButton}", c + "triggerPressed");
+            h.gripBtn = Button(side + "GripBtn", c + "{GripButton}", c + "gripPressed");
+            h.triggerAxis = Value(side + "TriggerAxis", "Axis", c + "{Trigger}", c + "trigger");
+            h.gripAxis = Value(side + "GripAxis", "Axis", c + "{Grip}", c + "grip");
+            h.stick = Value(side + "Stick", "Vector2", c + "{Primary2DAxis}", c + "thumbstick", c + "joystick", c + "trackpad");
+            h.menuBtn = Button(side + "Menu", c + "{MenuButton}", c + "menu", c + "menuButton");
+            h.stickClick = Button(side + "StickClick", c + "{Primary2DAxisClick}", c + "thumbstickClicked");
             return h;
         }
 
         void BuildInput()
         {
-            _move = Value("Move", "Vector2", "<XRController>{LeftHand}/{Primary2DAxis}");
-            _turn = Value("Turn", "Vector2", "<XRController>{RightHand}/{Primary2DAxis}");
-            _menu = Button("Menu", "<XRController>{LeftHand}/{MenuButton}", "<XRController>{LeftHand}/menu");
-            _recentre = Button("Recentre", "<XRController>{RightHand}/{Primary2DAxisClick}");
+            // Sticks, menu and recentre live on the hands now (both input paths, see Hand).
         }
+
+        // ------------------------------------------------------------------ input, two paths
+
+        static XRDev Legacy(Hand h) { return XRDevs.GetDeviceAtXRNode(h.node); }
+
+        static bool HasControl(InputAction a) { return a != null && a.controls.Count > 0; }
+
+        Vector2 Stick(Hand h)
+        {
+            Vector2 v = HasControl(h.stick) ? h.stick.ReadValue<Vector2>() : Vector2.zero;
+            if (v.sqrMagnitude > 0.0025f) return v;
+            Vector2 l;
+            var d = Legacy(h);
+            if (d.isValid && d.TryGetFeatureValue(XRUse.primary2DAxis, out l)) return l;
+            return v;
+        }
+
+        static float Axis(InputAction a, XRDev d, UnityEngine.XR.InputFeatureUsage<float> u)
+        {
+            float v = HasControl(a) ? a.ReadValue<float>() : 0f;
+            float l;
+            if (d.isValid && d.TryGetFeatureValue(u, out l)) v = Mathf.Max(v, l);
+            return v;
+        }
+
+        /// <summary>Edge from the legacy XR path; the Input System edge is OR-ed in by the caller.</summary>
+        static bool LegacyEdge(XRDev d, UnityEngine.XR.InputFeatureUsage<bool> u, ref bool last)
+        {
+            bool now = false;
+            if (d.isValid) d.TryGetFeatureValue(u, out now);
+            bool edge = now && !last;
+            last = now;
+            return edge;
+        }
+
+        void UpdateHandPoses()
+        {
+            if (_hands == null) return;
+            foreach (var h in _hands)
+            {
+                Vector3 gp = Vector3.zero, ap = Vector3.zero;
+                Quaternion gr = Quaternion.identity, ar = Quaternion.identity;
+                bool gripOk = false, aimOk = false;
+
+                if (HasControl(h.gripPos))
+                {
+                    gp = h.gripPos.ReadValue<Vector3>();
+                    gr = h.gripRot.ReadValue<Quaternion>();
+                    gripOk = gp != Vector3.zero;
+                }
+                if (HasControl(h.aimPos))
+                {
+                    ap = h.aimPos.ReadValue<Vector3>();
+                    ar = h.aimRot.ReadValue<Quaternion>();
+                    aimOk = ap != Vector3.zero;
+                }
+                var d = Legacy(h);
+                if (!gripOk && d.isValid
+                    && d.TryGetFeatureValue(XRUse.devicePosition, out gp)
+                    && d.TryGetFeatureValue(XRUse.deviceRotation, out gr))
+                    gripOk = gp != Vector3.zero;
+                if (!aimOk && d.isValid
+                    && d.TryGetFeatureValue(new UnityEngine.XR.InputFeatureUsage<Vector3>("PointerPosition"), out ap)
+                    && d.TryGetFeatureValue(new UnityEngine.XR.InputFeatureUsage<Quaternion>("PointerRotation"), out ar))
+                    aimOk = ap != Vector3.zero;
+
+                if (gr.x == 0f && gr.y == 0f && gr.z == 0f && gr.w == 0f) gr = Quaternion.identity;
+                if (ar.x == 0f && ar.y == 0f && ar.z == 0f && ar.w == 0f) ar = Quaternion.identity;
+
+                h.tracked = gripOk;
+                if (gripOk) h.grip.SetLocalPositionAndRotation(gp, gr);
+                if (aimOk) h.aim.SetLocalPositionAndRotation(ap, ar);
+                else if (gripOk)
+                    // No aim pose on this runtime: point from the fist, tilted up to where the
+                    // controller visibly points.
+                    h.aim.SetLocalPositionAndRotation(gp, gr * Quaternion.Euler(-35f, 0f, 0f));
+
+                // Untracked (asleep / not paired): keep the hand off the floor and out of sight
+                // instead of lying at the origin.
+                if (h.skin != null)
+                    foreach (var r in h.skin) if (r != null && r.enabled != gripOk) r.enabled = gripOk;
+            }
+        }
+
+        void OnBeforeRender() { if (_built) UpdateHandPoses(); }
 
         InputAction Value(string name, string layout, params string[] paths)
         {
@@ -319,8 +451,11 @@ namespace EscapeRoom
         {
             if (!_built) return;
 
+            UpdateHandPoses();
             UpdateHands();
+            UpdateTouch();
             UpdateOperator();
+            UpdateWarning();
             UpdatePanels();
             UpdateBody();
 
@@ -344,29 +479,69 @@ namespace EscapeRoom
         {
             foreach (var h in _hands)
             {
-                // Fallback for a runtime without the OpenXR aim pose: ride the grip instead of
-                // sitting at the origin with a laser out of the floor.
-                // Only once the controller exists: an asleep controller has no controls either,
-                // and must not be mistaken for one without an aim pose.
-                var ctrl = h.node == XRNode.LeftHand
-                    ? UnityEngine.InputSystem.XR.XRController.leftHand
-                    : UnityEngine.InputSystem.XR.XRController.rightHand;
-                if (ctrl != null && h.aimPos.controls.Count == 0 && h.aim.parent != h.grip)
-                {
-                    var tpd = h.aim.GetComponent<TrackedPoseDriver>();
-                    if (tpd != null) tpd.enabled = false;
-                    h.aim.SetParent(h.grip, false);
-                    h.aim.localPosition = Vector3.zero;
-                    h.aim.localRotation = Quaternion.identity;
-                }
+                var d = Legacy(h);
+                // Both edges are always evaluated, so neither path's "last" state goes stale.
+                bool lt = LegacyEdge(d, XRUse.triggerButton, ref h.legacyTrigger);
+                bool lg = LegacyEdge(d, XRUse.gripButton, ref h.legacyGrip);
+                bool pressed = h.trigger.WasPressedThisFrame() || h.gripBtn.WasPressedThisFrame() || lt || lg;
 
-                bool pressed = h.trigger.WasPressedThisFrame() || h.gripBtn.WasPressedThisFrame();
+                // Finger curl for the hand model: index follows the trigger, the fist the grip.
+                h.curlIndex = Mathf.Lerp(h.curlIndex, Axis(h.triggerAxis, d, XRUse.trigger), 0.5f);
+                h.curlFist = Mathf.Lerp(h.curlFist, Axis(h.gripAxis, d, XRUse.grip), 0.5f);
+                PoseFingers(h);
+
                 if (!pressed) continue;
                 // Switching hands while carrying would teleport the item; the other hand only takes
                 // over the pointer when nothing is held.
                 if (h != _active && _interactor.Held == null) SetActiveHand(h);
                 if (h == _active) EsVR.MarkPress();
             }
+        }
+
+        /// <summary>D-236: grab what the hand is ON. Visitors reach for objects before they ever
+        /// think of a laser. When the active hand is within reach of something the hub can use, the
+        /// aim ray is bent into it, so the same PlayerInteractor branch (pick up / insert / press)
+        /// runs - no puzzle learns that hands exist. The other hand takes over the pointer when it
+        /// is the one touching and nothing is carried.</summary>
+        void UpdateTouch()
+        {
+            const float reach = 0.13f;
+            Ray best = default(Ray);
+            Hand bestHand = null;
+            float bestD = float.MaxValue;
+            foreach (var h in _hands)
+            {
+                h.touching = false;
+                if (!h.tracked || EsVR.ModalOpen) continue;
+                if (_interactor.Held != null && h != _active) continue;   // the carrying hand only
+                Vector3 palm = h.hold.position;
+                foreach (var c in Physics.OverlapSphere(palm, reach, ~0, QueryTriggerInteraction.Collide))
+                {
+                    if (c == null || c == _body) continue;
+                    if (PlayerInteractor.IsHeldPart(_interactor.Held, c.transform)) continue;
+                    var g = c.GetComponentInParent<GrabbableItem>();
+                    bool usable = (g != null && !g.IsHeld && !g.pickupLocked)
+                                  || c.GetComponentInParent<IInteractable>() != null;
+                    if (!usable) continue;
+                    Vector3 p = c.ClosestPoint(palm);
+                    float dist = Vector3.Distance(p, palm);
+                    if (dist >= bestD) continue;
+                    Vector3 dir = p - palm;
+                    if (dir.sqrMagnitude < 1e-6f) dir = (c.bounds.center - palm);
+                    if (dir.sqrMagnitude < 1e-6f) dir = h.aim.forward;
+                    dir.Normalize();
+                    bestD = dist;
+                    bestHand = h;
+                    best = new Ray(p - dir * 0.25f, dir);
+                }
+            }
+            if (bestHand != null)
+            {
+                bestHand.touching = true;
+                if (bestHand != _active && _interactor.Held == null) SetActiveHand(bestHand);
+            }
+            EsVR.SetTouch(bestHand != null && bestHand == _active, best);
+            foreach (var h in _hands) SetSkin(h, h.touching);
         }
 
         void SetActiveHand(Hand h)
@@ -382,14 +557,23 @@ namespace EscapeRoom
         {
             var kb = Keyboard.current;
             bool restart = kb != null && kb.f5Key.wasPressedThisFrame;
-            if (_menu.IsPressed()) _menuHeld += Time.unscaledDeltaTime; else _menuHeld = 0f;
+            bool menuDown = _left.menuBtn.IsPressed();
+            if (!menuDown)
+            {
+                bool m;
+                var d = Legacy(_left);
+                if (d.isValid && d.TryGetFeatureValue(XRUse.menuButton, out m)) menuDown = m;
+            }
+            if (menuDown) _menuHeld += Time.unscaledDeltaTime; else _menuHeld = 0f;
             if (_menuHeld >= restartHoldSeconds) { _menuHeld = -999f; restart = true; }
             if (restart && EscapeGameManager.Instance != null)
             {
                 EscapeGameManager.Instance.Restart();
                 return;
             }
-            if ((kb != null && kb.f6Key.wasPressedThisFrame) || _recentre.WasPressedThisFrame()) Recentre();
+            bool click = LegacyEdge(Legacy(_right), XRUse.primary2DAxisClick, ref _right.legacyClick);
+            if ((kb != null && kb.f6Key.wasPressedThisFrame) || _right.stickClick.WasPressedThisFrame() || click)
+                Recentre();
         }
 
         void UpdateBody()
@@ -412,7 +596,18 @@ namespace EscapeRoom
 
             // 2. Stick locomotion, relative to where the head looks. Frozen behind a modal card,
             //    as the desktop intro zeroes the Starter Assets move input.
-            Vector2 stick = EsVR.ModalOpen ? Vector2.zero : _move.ReadValue<Vector2>();
+            //    Left stick walks; WASD / arrows on the PC keyboard too, so the operator can walk a
+            //    visitor out of a corner and the rig can be tested without a second person.
+            Vector2 stick = Stick(_left);
+            var kb = Keyboard.current;
+            if (kb != null)
+            {
+                Vector2 k = new Vector2(
+                    (kb.dKey.isPressed || kb.rightArrowKey.isPressed ? 1f : 0f) - (kb.aKey.isPressed || kb.leftArrowKey.isPressed ? 1f : 0f),
+                    (kb.wKey.isPressed || kb.upArrowKey.isPressed ? 1f : 0f) - (kb.sKey.isPressed || kb.downArrowKey.isPressed ? 1f : 0f));
+                if (k.sqrMagnitude > 0f) stick = k.normalized;
+            }
+            if (EsVR.ModalOpen) stick = Vector2.zero;
             Vector3 walk = Vector3.zero;
             if (stick.magnitude > stickDeadzone)
             {
@@ -432,7 +627,10 @@ namespace EscapeRoom
             _origin.position = new Vector3(_origin.position.x, FeetPosition().y, _origin.position.z);
 
             // 4. Snap turn around the head, so the visitor does not swing through the room.
-            float tx = _turn.ReadValue<Vector2>().x;
+            float tx = Stick(_right).x;
+            // Q / R turn from the keyboard (E is already "interact" on desktop).
+            if (kb != null && kb.qKey.isPressed) tx = -1f;
+            if (kb != null && kb.rKey.isPressed) tx = 1f;
             if (!_turnLatched && Mathf.Abs(tx) > 0.7f)
             {
                 _turnLatched = true;
@@ -482,7 +680,9 @@ namespace EscapeRoom
                 ? UnityEngine.InputSystem.XR.XRController.leftHand
                 : UnityEngine.InputSystem.XR.XRController.rightHand;
             var rumble = c as UnityEngine.InputSystem.XR.XRControllerWithRumble;
-            if (rumble != null) rumble.SendImpulse(amplitude, seconds);
+            if (rumble != null) { rumble.SendImpulse(amplitude, seconds); return; }
+            var d = Legacy(h);
+            if (d.isValid) d.SendHapticImpulse(0u, amplitude, seconds);
         }
 
         // ------------------------------------------------------------------ visuals
@@ -498,14 +698,143 @@ namespace EscapeRoom
             return _laserMat;
         }
 
-        void BuildControllerModel(Transform grip, string side)
+        /// <summary>D-236: a light glove instead of the old 4 cm dark box, which vanished against
+        /// the dark walls ("o boneco nao tem maos"). Built in grip space: the OpenXR grip pose sits in
+        /// the closed fist with +Z out of the front of the fist, so the palm wraps the Z axis and
+        /// the back of the hand faces outward (+X right hand, -X left hand). Fingers curl with the
+        /// analog trigger (index) and grip (the other three); the glove glows green while it is
+        /// touching something usable.</summary>
+        void BuildHandModel(Hand h, string side)
         {
-            var body = EsTheme.Box(side + "Model", grip, new Vector3(0f, -0.01f, -0.02f),
-                                   new Vector3(0.045f, 0.035f, 0.13f), EsTheme.Lit(EsTheme.ShellDark, 0.3f, 0.5f));
-            var tip = EsTheme.Box(side + "Tip", grip, new Vector3(0f, 0.005f, 0.05f),
-                                  new Vector3(0.03f, 0.012f, 0.02f), EsTheme.Glow(EsTheme.ScreenOn, 1.5f));
-            foreach (var c in new[] { body.GetComponent<Collider>(), tip.GetComponent<Collider>() })
-                if (c != null) Destroy(c);
+            float o = h.outward;
+            var root = new GameObject(side + " Model").transform;
+            root.SetParent(h.grip, false);
+            var skin = new List<Renderer>();
+
+            Part(root, "Palm", new Vector3(o * 0.022f, 0.005f, -0.025f), new Vector3(0.026f, 0.088f, 0.095f), _gloveMat, skin);
+            Part(root, "Cuff", new Vector3(o * 0.018f, 0.0f, -0.095f), new Vector3(0.05f, 0.075f, 0.05f), _cuffMat, skin);
+
+            // Four fingers stacked along Y (that is how a hand closes on a controller handle).
+            float[] ys = { 0.035f, 0.012f, -0.011f, -0.032f };
+            float[] len = { 0.042f, 0.046f, 0.043f, 0.034f };
+            for (int i = 0; i < 4; i++)
+            {
+                var j1 = Joint(root, "Finger" + i, new Vector3(o * 0.022f, ys[i], 0.022f));
+                Part(j1, "P", new Vector3(0f, 0f, len[i] * 0.5f), new Vector3(0.02f, 0.019f, len[i]), _gloveMat, skin);
+                var j2 = Joint(j1, "J", new Vector3(0f, 0f, len[i]));
+                Part(j2, "D", new Vector3(0f, 0f, len[i] * 0.4f), new Vector3(0.018f, 0.017f, len[i] * 0.8f), _gloveMat, skin);
+                h.fingerJoints.Add(j1); h.jointWeight.Add(i == 0 ? -1f : 1f);
+                h.fingerJoints.Add(j2); h.jointWeight.Add(i == 0 ? -1f : 1f);
+                if (i == 0) { h.indexRoot = j1; h.indexMid = j2; }
+            }
+            // Thumb on top, along the controller's face, slightly inward.
+            var t1 = Joint(root, "Thumb", new Vector3(o * 0.004f, 0.05f, -0.03f));
+            t1.localRotation = Quaternion.Euler(-25f, -o * 25f, 0f);
+            Part(t1, "T", new Vector3(0f, 0f, 0.028f), new Vector3(0.022f, 0.02f, 0.056f), _gloveMat, skin);
+
+            h.skin = skin.ToArray();
+        }
+
+        static Transform Joint(Transform parent, string name, Vector3 pos)
+        {
+            var t = new GameObject(name).transform;
+            t.SetParent(parent, false);
+            t.localPosition = pos;
+            return t;
+        }
+
+        static void Part(Transform parent, string name, Vector3 pos, Vector3 size, Material mat, List<Renderer> skin)
+        {
+            var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            go.name = name;
+            // Immediate, not Destroy: a hand collider alive for one frame would be hit by the
+            // laser and the body before it went away.
+            DestroyImmediate(go.GetComponent<Collider>());
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = pos;
+            go.transform.localScale = size;
+            var r = go.GetComponent<Renderer>();
+            r.sharedMaterial = mat;
+            r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            skin.Add(r);
+        }
+
+        /// <summary>Curl toward the palm side (-outward on X), which is a yaw in grip space.</summary>
+        void PoseFingers(Hand h)
+        {
+            for (int i = 0; i < h.fingerJoints.Count; i++)
+            {
+                bool index = h.jointWeight[i] < 0f;
+                float curl = index ? h.curlIndex : Mathf.Max(h.curlFist, 0.15f);
+                float deg = (i % 2 == 0 ? 70f : 80f) * curl + 8f;
+                h.fingerJoints[i].localRotation = Quaternion.Euler(0f, -h.outward * deg, 0f);
+            }
+        }
+
+        void SetSkin(Hand h, bool touching)
+        {
+            if (h.skin == null) return;
+            var m = touching ? _gloveTouchMat : _gloveMat;
+            foreach (var r in h.skin)
+                if (r != null && r.name != "Cuff" && r.sharedMaterial != m) r.sharedMaterial = m;
+        }
+
+        // ------------------------------------------------------------------ diagnostics
+
+        /// <summary>Written to Player.log / Editor.log, so a failed headset test tells us WHY.</summary>
+        void LogDevices()
+        {
+            var sb = new System.Text.StringBuilder("[VR] Dispositivos Input System:");
+            foreach (var d in InputSystem.devices) sb.Append(" | ").Append(d.layout).Append(" ").Append(string.Join(",", d.usages));
+            var xr = new List<XRDev>();
+            XRDevs.GetDevices(xr);
+            sb.Append("\n[VR] Dispositivos XR:");
+            foreach (var d in xr) sb.Append(" | ").Append(d.name).Append(" (").Append(d.characteristics).Append(")");
+            Debug.Log(sb.ToString());
+        }
+
+        void BuildWarning()
+        {
+            var go = new GameObject("VR Controller Warning", typeof(RectTransform));
+            go.transform.SetParent(_cam.transform, false);
+            go.transform.localPosition = new Vector3(0f, -0.15f, 1.2f);
+            _warnCanvas = go.AddComponent<Canvas>();
+            _warnCanvas.renderMode = RenderMode.WorldSpace;
+            _warnCanvas.worldCamera = _cam;
+            _warnCanvas.sortingOrder = 50;
+            var rt = (RectTransform)go.transform;
+            rt.sizeDelta = new Vector2(1100f, 260f);
+            rt.localScale = Vector3.one * 0.0007f;
+            var bg = EsUi.Img(go.transform, "Bg", new Color(0.25f, 0.05f, 0.04f, 0.88f));
+            EsUi.Stretch(bg.rectTransform);
+            bg.raycastTarget = false;
+            _warnText = EsUi.Label(go.transform, "Text",
+                "CONTROLES NAO DETECTADOS\nLigue os dois controles (aperte o botao Meta/Oculus)\ne confira se estao pareados no Quest Link / SteamVR.",
+                40, Color.white, TextAnchor.MiddleCenter, FontStyle.Bold);
+            EsUi.Stretch(_warnText.rectTransform, 16f);
+            _warnText.raycastTarget = false;
+            go.SetActive(false);
+        }
+
+        bool _loggedLate;
+
+        void UpdateWarning()
+        {
+            if (_warnCanvas == null) return;
+            bool any = _left.tracked || _right.tracked;
+            bool show = !any && Time.realtimeSinceStartup - _xrSince > 3f;
+            if (_warnCanvas.gameObject.activeSelf != show) _warnCanvas.gameObject.SetActive(show);
+            if (show && !_loggedLate)
+            {
+                _loggedLate = true;
+                Debug.LogWarning("[VR] Nenhum controle rastreado 3 s apos o rig montar.");
+                LogDevices();
+            }
+            if (any && _loggedLate)
+            {
+                _loggedLate = false;
+                Debug.Log("[VR] Controle(s) rastreado(s): esq=" + _left.tracked + " dir=" + _right.tracked);
+            }
         }
 
         void BuildLaser(Hand h)
@@ -540,6 +869,14 @@ namespace EscapeRoom
         void UpdateLaser()
         {
             if (_active == null || _active.laser == null) return;
+            // Touching: the hand itself is the cursor (it glows), the laser would only clutter.
+            bool showLaser = !EsVR.TouchActive && _active.tracked;
+            if (_active.laser.enabled != showLaser)
+            {
+                _active.laser.enabled = showLaser;
+                _active.dotRenderer.enabled = showLaser;
+            }
+            if (!showLaser) return;
             Ray ray = EsVR.AimRay;
             float len = SolidDistance(ray);
             if (_pointer != null && EsVR.UiHovered != null && _pointer.VRHitDistance > 0f)
@@ -592,7 +929,7 @@ namespace EscapeRoom
         {
             if (intro.introPanel == null) return;
             var hint = EsUi.Label(intro.introPanel.transform, "VrControls",
-                "VR:  GATILHO interage   |   ANALOGICO ESQ. anda   |   ANALOGICO DIR. gira",
+                "VR:  ENCOSTE A MAO ou mire o laser + GATILHO   |   ANALOGICO ESQ. anda   |   DIR. gira",
                 30, new Color(0.55f, 0.92f, 0.80f), TextAnchor.MiddleCenter);
             var r = hint.rectTransform;
             r.anchorMin = new Vector2(0f, 0f); r.anchorMax = new Vector2(1f, 0f);

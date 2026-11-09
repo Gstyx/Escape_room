@@ -52,9 +52,17 @@ namespace EscapeRoom
 
         internal static void MarkPress() { _pressFrame = Time.frameCount; }
 
-        public static Ray AimRay => AimOrigin != null
-            ? new Ray(AimOrigin.position, AimOrigin.forward)
-            : new Ray(Vector3.zero, Vector3.forward);
+        /// <summary>Set by the rig when the active hand is TOUCHING something it can use (D-236):
+        /// the ray then runs from just behind the touch point into it, so "grab what my hand is on"
+        /// goes through the same hub, guards and prompts as the laser.</summary>
+        public static bool TouchActive { get; internal set; }
+        static Ray _touchRay;
+        internal static void SetTouch(bool on, Ray r) { TouchActive = on; _touchRay = r; }
+
+        public static Ray AimRay => TouchActive ? _touchRay
+            : AimOrigin != null
+                ? new Ray(AimOrigin.position, AimOrigin.forward)
+                : new Ray(Vector3.zero, Vector3.forward);
 
         // Statics survive play sessions here (scene and domain reload are disabled, see AGENTS.md),
         // so they are cleared before every run instead of trusted to start empty.
@@ -66,6 +74,7 @@ namespace EscapeRoom
             HoldPoint = null;
             UiHovered = null;
             ModalOpen = false;
+            TouchActive = false;
             _modalCanvases.Clear();
             _pressFrame = -1;
             SceneManager.sceneLoaded -= OnSceneLoaded;

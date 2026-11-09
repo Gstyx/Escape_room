@@ -60,7 +60,7 @@ public static class EsSceneBuilder
     // sentence has cost something.
     const string ARC_PREFAB = "Wall_Arc";
 
-    static Material _shell, _shellDark, _metal, _gold, _glowOn, _alarm, _paper, _exitGlow, _void,
+    static Material _shell, _shellDark, _metal, _ceiling, _gold, _glowOn, _alarm, _paper, _exitGlow, _void,
                   _kitWall,
                   _frost, _carpet, _belt, _screenOff, _panelGlow, _cabRed, _fiber,
                   _hexBase, _hexDim, _hexLive, _hexSrc, _hexLiveTile, _hexLeaf, _hexLeafLive;
@@ -6683,7 +6683,10 @@ public static class EsSceneBuilder
         // and safe built from these rendered as a pure-black silhouette, even right under a lamp.
         _shell    = Mat("M_Shell",    EsTheme.Shell,    0.10f, 0.30f, Color.black, 0f);
         _shellDark= Mat("M_ShellDark",EsTheme.ShellDark,0.05f, 0.20f, Color.black, 0f);
-        _metal    = Mat("M_Metal",    EsTheme.Metal,    0.40f, 0.50f, Color.black, 0f);
+        _metal    = Mat("M_Metal",    EsTheme.Metal,    0.30f, 0.50f, Color.black, 0f);
+        // D-236: light panelled ceiling. The dark slab read as an open black void above the room -
+        // in a headset the eye goes up immediately, and nothing up there gave it a surface.
+        _ceiling  = Mat("M_Ceiling",  new Color32(0xB4,0xBA,0xC2,0xFF), 0f, 0.25f, Color.black, 0f);
         // The kit's own wall material, so an additive wall piece is indistinguishable from a kit tile.
         // Loaded as an ASSET and not recreated: the kit is a single atlas shared by every model, and a
         // runtime-created copy of it would not survive the saved scene (D-41's reasoning).
@@ -6704,8 +6707,10 @@ public static class EsSceneBuilder
         // shadow, never as sky (D-41)
         _void     = Mat("M_VoidBlock", new Color(0.012f, 0.014f, 0.018f), 0f, 0f, Color.black, 0f);
         // --- dressing palette (Filial 9 ambience pass)
-        _carpet   = Mat("M_Carpet",   new Color32(0x23,0x2A,0x3A,0xFF), 0f, 0.95f, Color.black, 0f);
-        _belt     = Mat("M_Belt",     new Color32(0x1E,0x2A,0x52,0xFF), 0f, 0.90f, Color.black, 0f);
+        // D-236: lighter carpet / belt. At 0x232A3A next to the near-white kit floor the runners read
+        // as holes in the floor, not as carpet.
+        _carpet   = Mat("M_Carpet",   new Color32(0x3A,0x5C,0x80,0xFF), 0f, 0.95f, Color.black, 0f);
+        _belt     = Mat("M_Belt",     new Color32(0x2E,0x4C,0x9A,0xFF), 0f, 0.90f, Color.black, 0f);
         _screenOff= Mat("M_ScreenOff",new Color32(0x05,0x07,0x0A,0xFF), 0.20f, 0.60f, Color.black, 0f);
         _panelGlow= Mat("M_PanelGlow",new Color(0.85f, 0.95f, 1f), 0f, 0.40f, new Color(0.75f, 0.90f, 1f), 0.60f);
         _cabRed   = Mat("M_CabRed",   new Color32(0x8C,0x1A,0x12,0xFF), 0.30f, 0.45f, Color.black, 0f);
@@ -6713,7 +6718,7 @@ public static class EsSceneBuilder
         _fiber    = Mat("M_Fiber",    new Color32(0x1A,0x08,0x08,0xFF), 0f, 0.40f, new Color(1f, 0.20f, 0.15f), 0.50f);
         // Hex mesh puzzle (Fase 1): dark tile, dim-red dead ports, cyan live ports,
         // amber emitter/receptor bodies. Assets, never runtime (D-23/D-49).
-        _hexBase  = Mat("M_HexBase",  new Color32(0x2C,0x32,0x3A,0xFF), 0.10f, 0.35f, Color.black, 0f);   // D-235: was black metal
+        _hexBase  = Mat("M_HexBase",  new Color32(0x46,0x50,0x5C,0xFF), 0.10f, 0.35f, Color.black, 0f);   // D-235: was black metal; D-236 lighter
         _hexDim   = Mat("M_HexDim",   new Color32(0x3A,0x0E,0x0C,0xFF), 0f, 0.50f, new Color(0.85f, 0.12f, 0.12f), 0.2f);
         _hexLive  = Mat("M_HexLive",  EsTheme.CardCyan, 0f, 0.50f, EsTheme.CardCyan, 0.50f);
         _hexSrc   = Mat("M_HexSrc",   new Color32(0x4A,0x32,0x0E,0xFF), 0.30f, 0.40f, EsTheme.KeyAccent, 0.30f);
@@ -6773,7 +6778,7 @@ public static class EsSceneBuilder
         // primitive's collider is left exactly as EsTheme.Box builds it: solid.
         float cb = CeilBottom;
         var ceil = EsTheme.Box("Ceiling", g.transform,
-            new Vector3(0.1f, cb + 0.10f, 0.2f), new Vector3(24.4f, 0.20f, 24.2f), _shellDark);
+            new Vector3(0.1f, cb + 0.10f, 0.2f), new Vector3(24.4f, 0.20f, 24.2f), _ceiling);   // D-236: was _shellDark, a black void overhead
     }
 
     // =====================================================================
@@ -7108,7 +7113,7 @@ public static class EsSceneBuilder
 
         // ---- maintenance log next to it: puzzle input #2
         var log = EsUi.WorldCanvas(root, "RegistroManutencao",
-            new Vector3(WALL_W + 0.20f, 1.55f, 0.4f), new Vector3(0f, -84f, -5f),
+            new Vector3(WALL_W + 0.20f, 1.55f, 0.4f), new Vector3(0f, -90f, 0f),   // D-236: was -84/-5, read as peeling off
             new Vector2(900f, 640f), new Color32(0x1A, 0x1C, 0x18, 0xFF));
         log.GetComponent<RectTransform>().localScale = Vector3.one * 0.0018f;   // ~1.62 x 1.15 m
 
@@ -7125,6 +7130,64 @@ public static class EsSceneBuilder
             40, new Color(0.88f, 0.86f, 0.78f), TextAnchor.UpperLeft);
         lBody.rectTransform.anchorMin = Vector2.zero; lBody.rectTransform.anchorMax = Vector2.one;
         lBody.rectTransform.offsetMin = new Vector2(45, 40); lBody.rectTransform.offsetMax = new Vector2(-45, -120);
+
+        MountOnWall(board);
+        MountOnWall(log);
+    }
+
+    /// <summary>D-236: a wall board is a framed plate flush on the wall, not a sheet hovering in front
+    /// of it. The player's report ("os quadros com os avisos ... parecem desgrudados da parede") is
+    /// exactly what a zero-thickness canvas 20 cm off the wall looks like in a headset: stereo depth
+    /// shows the gap that a flat monitor hid. The wall is MEASURED (ray from the board into the wall,
+    /// along the canvas' +Z, which is the back of a world canvas), the canvas is moved to sit just in
+    /// front of a 4 cm frame, and the frame runs from the wall surface to the canvas. When no wall is
+    /// found within 1 m the board stays where it is and the frame runs 0.30 m back, so it still
+    /// reaches into whatever is behind it instead of floating.</summary>
+    static void MountOnWall(Canvas cv)
+    {
+        const float depth = 0.04f, border = 0.05f;
+        var t = cv.transform;
+        var rt = (RectTransform)t;
+        Vector2 size = new Vector2(rt.sizeDelta.x * t.lossyScale.x, rt.sizeDelta.y * t.lossyScale.y);
+        Vector3 back = t.forward;
+
+        Physics.SyncTransforms();
+        Vector3 from = t.position - back * 0.6f;
+        float best = float.MaxValue;
+        Vector3 wall = Vector3.zero;
+        // Centre and four inset corners: the wall tiles are not one plane, so the board takes the
+        // NEAREST surface - never pushed into a bulge.
+        foreach (var o in new[] { Vector2.zero, new Vector2(-0.4f, -0.4f), new Vector2(0.4f, -0.4f),
+                                  new Vector2(-0.4f, 0.4f), new Vector2(0.4f, 0.4f) })
+        {
+            Vector3 p = from + t.right * (o.x * size.x) + t.up * (o.y * size.y);
+            foreach (var h in Physics.RaycastAll(p, back, 1.6f, ~0, QueryTriggerInteraction.Ignore))
+            {
+                if (h.collider == null || h.collider.transform.IsChildOf(t)) continue;
+                float along = Vector3.Dot(h.point - t.position, back);
+                if (along < -0.3f) continue;            // something in front of the board, not the wall
+                if (along < best) { best = along; wall = h.point; }
+            }
+        }
+
+        float frameBack;
+        if (best < 1.0f)
+        {
+            t.position += back * (best - depth - 0.004f);
+            frameBack = depth;
+        }
+        else
+        {
+            Debug.LogWarning("[EscapeRoom] MountOnWall: no wall behind " + cv.name + " - framed in place");
+            frameBack = 0.30f;
+        }
+
+        var frame = EsTheme.Box(cv.name + "_Frame", t.parent, Vector3.zero,
+                                new Vector3(size.x + border * 2f, size.y + border * 2f, frameBack), _metal);
+        frame.transform.SetPositionAndRotation(t.position + back * (frameBack * 0.5f + 0.002f), t.rotation);
+        Object.DestroyImmediate(frame.GetComponent<Collider>());   // decoration: never answers a ray
+        Debug.Log("[EscapeRoom] " + cv.name + " mounted: wall " + (best < 1f ? best.ToString("F3") + " m behind" : "not found")
+                  + ", board " + size.x.ToString("F2") + " x " + size.y.ToString("F2") + " m");
     }
 
     // =====================================================================
@@ -7306,6 +7369,7 @@ public static class EsSceneBuilder
                              new Color(0.88f, 0.94f, 0.91f), TextAnchor.UpperCenter);
         bs2.rectTransform.anchorMin = Vector2.zero; bs2.rectTransform.anchorMax = Vector2.one;
         bs2.rectTransform.offsetMin = new Vector2(15, 12); bs2.rectTransform.offsetMax = new Vector2(-15, -140);
+        MountOnWall(bs);
 
         // ---- facility smalls: fire cabinet by the exit, bins by the benches
         EsTheme.Box("FireCabinet", dress.transform, new Vector3(-3.6f, 1.1f, -11.3f),
