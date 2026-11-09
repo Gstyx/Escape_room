@@ -41,10 +41,11 @@ serve para VR e desktop: com headset conectado ele abre em VR.
 
 | Acao | Controle |
 |---|---|
-| Interagir (pegar, largar, inserir, apertar botao) | **Gatilho** ou **grip**, em qualquer mao |
-| Andar | **Analogico esquerdo** (na direcao que voce olha) |
-| Girar 30° | **Analogico direito** para os lados |
-| Andar de verdade | permitido, a sala acompanha (*room-scale*) |
+| Interagir de perto (pegar, inserir, apertar) | **Encoste a mao** no objeto (a luva fica **verde**) e aperte **gatilho** ou **grip** |
+| Interagir de longe (botoes nas telas) | Mire o **laser** e aperte **gatilho** ou **grip** |
+| Andar | **Analogico esquerdo** (na direcao que voce olha) — ou **WASD / setas** no teclado do PC |
+| Girar 45° | **Analogico direito** para os lados — ou **Q / R** no teclado do PC |
+| Ficar parado | o visitante fica **no lugar**; toda a movimentacao e pelo **analogico esquerdo** (um passo ou inclinar o corpo tambem funciona, mas nao e necessario) |
 | Ver tempo restante | olhe para o **relogio no pulso esquerdo** |
 
 A mao que aperta o gatilho vira o ponteiro. O laser fica **verde** quando o que esta na mira
@@ -58,6 +59,7 @@ reage ao clique; um rotulo junto ao ponto do laser diz o que vai acontecer.
 | **Recentralizar** (visitante virado para o lado errado) | **F6**, ou clique no **analogico direito** |
 
 Dicas:
+- **Configure o Quest com limite ESTACIONARIO** (Configuracoes > Limite > Estacionario): o estande e pequeno e o jogo nao exige andar.
 - Marque no chao o ponto em que o visitante deve ficar e aperte **F6** com ele olhando para frente.
 - O monitor do PC espelha a visao do headset — bom para o publico acompanhar.
 - O suporte vital e de **60:00**. Para filas longas, reduza `reserveSeconds` no
@@ -67,6 +69,15 @@ Dicas:
 
 - **Nao foi testado com headset real** nesta sessao (nenhum disponivel). Faca um playtest
   completo antes da feira: intro > malha hex > logs > cofre (3719) > placas > cartao > porta.
-- Itens sao pegos pelo laser (alcance de 3,4 m), nao encostando a mao no objeto.
-- Locomocao suave pode enjoar quem nunca usou VR: prefira que o visitante ande de verdade
-  e use o analogico so para distancias maiores.
+- Itens podem ser pegos encostando a mao (D-236) ou pelo laser (alcance de 3,4 m).
+
+## Se algo nao funcionar no headset
+
+| Sintoma | O que fazer |
+|---|---|
+| Aviso vermelho **CONTROLES NAO DETECTADOS** | Ligue os controles (botao Meta/Oculus), confira se estao pareados no Quest Link / SteamVR |
+| Imagem no headset mas sem maos e sem andar | O rig VR nao montou. Veja no console/log se aparece `[VR] Rig VR ativo` |
+| Qualquer outro problema | Mande o log: no editor `%LOCALAPPDATA%\Unity\Editor\Editor.log`; no .exe `%USERPROFILE%\AppData\LocalLow\<empresa>\<jogo>\Player.log` (linhas `[VR]`) |
+- Locomocao pelo analogico pode enjoar quem nunca usou VR. Oriente o visitante a empurrar o
+  analogico devagar e a girar pelo analogico direito (giro em saltos de 45°), nao pelo corpo.
+  Se alguem passar mal, tire o headset - nao insista.

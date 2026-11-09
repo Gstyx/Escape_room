@@ -63,6 +63,10 @@ public static class EsShots
         Shoot(cam, rt, dir, "HexPanel", "st_hex");
         Shoot(cam, rt, dir, "LogStation", "st_logs");
         Shoot(cam, rt, dir, "PlateReader", "st_reader");
+        // D-236: the wall boards, head-on and from the side (the side view is what shows a gap).
+        Oblique(cam, rt, dir, "MuralPlantao09", "board_mural");
+        Oblique(cam, rt, dir, "RegistroManutencao", "board_log");
+        Oblique(cam, rt, dir, "BranchSign", "board_branch");
 
         // same eye views with the power restored (the state most of a run is played in)
         var gm = Object.FindFirstObjectByType<EscapeRoom.EscapeGameManager>();
@@ -119,6 +123,21 @@ public static class EsShots
             Save(cam, rt, Path.Combine(dir, file + (sgn > 0 ? "_a" : "_b") + ".png"));
         }
         Debug.Log("[Shots] " + name + " at " + b.center + " fwd " + fwd);
+    }
+
+    /// <summary>A world canvas faces its local -Z, so the viewer stands on -forward.</summary>
+    static void Oblique(Camera cam, RenderTexture rt, string dir, string name, string file)
+    {
+        var go = GameObject.Find(name);
+        if (go == null) { Debug.Log("[Shots] not found " + name); return; }
+        var t = go.transform;
+        Vector3 front = -t.forward;
+        foreach (var v in new[] { new Vector2(0f, 2.4f), new Vector2(1.6f, 1.0f) })
+        {
+            cam.transform.position = t.position + front * v.y + t.right * v.x;
+            cam.transform.LookAt(t.position);
+            Save(cam, rt, Path.Combine(dir, file + (v.x == 0f ? "_front" : "_side") + ".png"));
+        }
     }
 
     static void Save(Camera cam, RenderTexture rt, string path)
